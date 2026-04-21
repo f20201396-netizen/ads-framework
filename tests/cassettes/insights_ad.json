@@ -1,0 +1,31 @@
+{
+  "data": [
+    {
+      "ad_id": "23851234567891",
+      "date_start": "2024-06-01",
+      "date_stop": "2024-06-01",
+      "impressions": "10000",
+      "reach": "8500",
+      "frequency": "1.176470",
+      "spend": "47.23",
+      "cpm": "4.723",
+      "cpc": "0.89",
+      "ctr": "0.053",
+      "clicks": "531",
+      "unique_clicks": "498",
+      "actions": [
+        {"action_type": "link_click", "value": "531"},
+        {"action_type": "post_engagement", "value": "620"}
+      ],
+      "purchase_roas": [
+        {"action_type": "omni_purchase", "value": "3.21"}
+      ]
+    }
+  ],
+  "paging": {
+    "cursors": {
+      "before": "before_cursor",
+      "after": "after_cursor"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "ad_id": "23851234567891",
+      "date_start": "2024-06-01",
+      "date_stop": "2024-06-01",
+      "age": "25-34",
+      "gender": "female",
+      "impressions": "4100",
+      "reach": "3600",
+      "spend": "18.50",
+      "clicks": "210"
+    },
+    {
+      "ad_id": "23851234567891",
+      "date_start": "2024-06-01",
+      "date_stop": "2024-06-01",
+      "age": "25-34",
+      "gender": "male",
+      "impressions": "5900",
+      "reach": "4900",
+      "spend": "28.73",
+      "clicks": "321"
+    }
+  ],
+  "paging": {
+    "cursors": {
+      "before": "before_cursor",
+      "after": "after_cursor"
+    }
+  }
+}
