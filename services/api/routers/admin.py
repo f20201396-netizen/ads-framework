@@ -29,12 +29,15 @@ _MAX_LIMIT = 500
 
 # Map job name → callable import path (imported lazily to avoid circular deps)
 _JOB_MAP: dict[str, str] = {
-    "sync_structure":        "services.worker.jobs.sync_structure:sync_account_structure",
-    "sync_insights_daily":   "services.worker.jobs.sync_insights:sync_insights_daily",
-    "sync_higher_levels":    "services.worker.jobs.sync_higher_levels:sync_insights_higher_levels",
-    "sync_breakdowns":       "services.worker.jobs.sync_breakdowns:sync_insights_breakdowns",
-    "sync_aux":              "services.worker.jobs.sync_aux:sync_audiences_pixels_catalogs",
-    "sync_pixel_stats":      "services.worker.jobs.sync_aux:sync_pixel_stats",
+    "sync_structure":              "services.worker.jobs.sync_structure:sync_account_structure",
+    "sync_insights_daily":         "services.worker.jobs.sync_insights:sync_insights_daily",
+    "sync_higher_levels":          "services.worker.jobs.sync_higher_levels:sync_insights_higher_levels",
+    "sync_breakdowns":             "services.worker.jobs.sync_breakdowns:sync_insights_breakdowns",
+    "sync_aux":                    "services.worker.jobs.sync_aux:sync_audiences_pixels_catalogs",
+    "sync_pixel_stats":            "services.worker.jobs.sync_aux:sync_pixel_stats",
+    "sync_attribution_signups":    "services.worker.jobs.sync_attribution:sync_attribution_signups",
+    "sync_attribution_conversions":"services.worker.jobs.sync_attribution:sync_attribution_conversions",
+    "refresh_conversion_mv":       "services.worker.jobs.sync_attribution:refresh_conversion_mv",
 }
 
 
@@ -121,6 +124,28 @@ async def get_sync_run(run_id: int, db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # GET /admin/rate-limits
 # ---------------------------------------------------------------------------
+
+@router.post("/attribution/backfill", summary="Backfill attribution events for a date range")
+async def trigger_attribution_backfill(
+    event_type: str = Query(..., description="signups | conversions"),
+    since: str = Query(..., description="YYYY-MM-DD"),
+    until: str = Query(..., description="YYYY-MM-DD"),
+) -> dict:
+    """Fire-and-forget attribution backfill for a single event type, chunked by month."""
+    if event_type not in ("signups", "conversions"):
+        raise HTTPException(status_code=422, detail="event_type must be 'signups' or 'conversions'")
+    from services.worker.jobs.sync_attribution import backfill_attribution
+    import asyncio
+    asyncio.create_task(backfill_attribution(event_type=event_type, since=since, until=until))
+    return {"status": "triggered", "event_type": event_type, "since": since, "until": until}
+
+
+@router.get("/attribution/cursors", summary="Current attribution sync watermarks")
+async def get_attribution_cursors(db: AsyncSession = Depends(get_db)) -> dict:
+    from sqlalchemy import text
+    rows = await db.execute(text("SELECT * FROM attribution_sync_cursor ORDER BY job_name"))
+    return {"data": [dict(r._mapping) for r in rows]}
+
 
 @router.get("/rate-limits", response_model=Paginated[ApiRateLimitOut])
 async def list_rate_limits(

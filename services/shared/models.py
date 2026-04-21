@@ -596,6 +596,70 @@ class ApiRateLimit(Base):
     app_usage: Mapped[dict | None] = mapped_column(JSONB)
 
 
+# =============================================================================
+# ATTRIBUTION TABLES (Phase 6)
+# =============================================================================
+
+class AttributionEvent(Base):
+    """
+    One row per attributed event (signup / trial / conversion / repeat_conversion).
+    Partitioned monthly on install_date (= user signup date).
+    """
+    __tablename__ = "attribution_events"
+
+    id: Mapped[str]                  = mapped_column(String,              primary_key=True)
+    install_date: Mapped[date]       = mapped_column(Date,                primary_key=True)
+    user_id: Mapped[int]             = mapped_column(BigInteger,           nullable=False)
+    event_name: Mapped[str]          = mapped_column(String,               nullable=False)
+    event_time: Mapped[datetime]     = mapped_column(DateTime(timezone=True), nullable=False)
+    days_since_signup: Mapped[int | None]  = mapped_column(Integer)
+    network: Mapped[str | None]      = mapped_column(String)
+    publisher_site: Mapped[str | None] = mapped_column(String)
+    meta_campaign_id: Mapped[str | None] = mapped_column(String)
+    meta_adset_id: Mapped[str | None]    = mapped_column(String)
+    meta_creative_id: Mapped[str | None] = mapped_column(String)
+    campaign_name: Mapped[str | None]    = mapped_column(Text)
+    adset_name: Mapped[str | None]       = mapped_column(Text)
+    creative_name: Mapped[str | None]    = mapped_column(Text)
+    revenue_inr: Mapped[Decimal | None]  = mapped_column(Numeric(12, 2))
+    plan_id: Mapped[str | None]          = mapped_column(String)
+    is_trial: Mapped[bool]               = mapped_column(Boolean, nullable=False, server_default="false")
+    is_first_payment: Mapped[bool]       = mapped_column(Boolean, nullable=False, server_default="false")
+    is_reattributed: Mapped[bool]        = mapped_column(Boolean, nullable=False, server_default="false")
+    is_organic: Mapped[bool]             = mapped_column(Boolean, nullable=False, server_default="false")
+    is_viewthrough: Mapped[bool]         = mapped_column(Boolean, nullable=False, server_default="false")
+    platform: Mapped[str | None]         = mapped_column(String)
+    os_version: Mapped[str | None]       = mapped_column(String)
+    device_brand: Mapped[str | None]     = mapped_column(String)
+    device_model: Mapped[str | None]     = mapped_column(String)
+    priority: Mapped[str | None]         = mapped_column(String)
+    source_table: Mapped[str]            = mapped_column(String, nullable=False)
+    raw: Mapped[dict]                    = mapped_column(JSONB,  nullable=False, server_default="{}")
+    synced_at: Mapped[datetime]          = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttributionSyncCursor(Base):
+    __tablename__ = "attribution_sync_cursor"
+
+    job_name: Mapped[str]                    = mapped_column(String, primary_key=True)
+    last_processed_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_at: Mapped[datetime | None]         = mapped_column(DateTime(timezone=True))
+    rows_ingested_last_run: Mapped[int]          = mapped_column(Integer, server_default="0")
+    bytes_processed_last_run: Mapped[int]        = mapped_column(BigInteger, server_default="0")
+    error: Mapped[dict | None]                   = mapped_column(JSONB)
+
+
+class BQQueryCost(Base):
+    __tablename__ = "bq_query_costs"
+
+    id: Mapped[int]                   = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    query_label: Mapped[str | None]   = mapped_column(String)
+    bytes_processed: Mapped[int | None] = mapped_column(BigInteger)
+    rows_returned: Mapped[int | None]   = mapped_column(Integer)
+    run_at: Mapped[datetime]            = mapped_column(DateTime(timezone=True), server_default=func.now())
+    duration_ms: Mapped[int | None]     = mapped_column(Integer)
+
+
 class PixelEventStatsDaily(Base):
     __tablename__ = "pixel_event_stats_daily"
     __table_args__ = (

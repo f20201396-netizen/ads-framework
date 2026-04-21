@@ -9,6 +9,8 @@ asyncpg>=0.29.0
 tenacity>=8.3.0
 apscheduler>=3.10.4
 python-dotenv>=1.0.1
+google-cloud-bigquery>=3.20.0
+google-auth>=2.29.0
 
 # Dev / test
 pytest>=8.2.0

@@ -19,6 +19,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from services.worker.jobs.sync_attribution import (
+    refresh_conversion_mv,
+    sync_attribution_conversions,
+    sync_attribution_signups,
+)
 from services.worker.jobs.sync_aux import sync_audiences_pixels_catalogs, sync_pixel_stats
 from services.worker.jobs.sync_breakdowns import sync_insights_breakdowns
 from services.worker.jobs.sync_higher_levels import sync_insights_higher_levels
@@ -105,6 +110,29 @@ async def main() -> None:
         sync_pixel_stats,
         CronTrigger(hour=21, minute=30, timezone="UTC"),
         id="sync_pixel_stats",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Attribution (Phase 6) — every 15 min; MV refresh hourly
+    scheduler.add_job(
+        sync_attribution_signups,
+        IntervalTrigger(minutes=15),
+        id="sync_attribution_signups",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        sync_attribution_conversions,
+        IntervalTrigger(minutes=15),
+        id="sync_attribution_conversions",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        refresh_conversion_mv,
+        IntervalTrigger(hours=1),
+        id="refresh_conversion_mv",
         max_instances=1,
         coalesce=True,
     )

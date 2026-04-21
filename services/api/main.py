@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from services.api.routers import admin, audiences, catalogs, insights, structure
+from services.api.routers import admin, audiences, catalogs, conversions, insights, structure
 from services.shared.config import settings
 
 log = logging.getLogger(__name__)
@@ -114,6 +114,7 @@ def create_app() -> FastAPI:
     app.include_router(insights.router)
     app.include_router(audiences.router)
     app.include_router(catalogs.router)
+    app.include_router(conversions.router)
     app.include_router(admin.router)
 
     # -----------------------------------------------------------------------
