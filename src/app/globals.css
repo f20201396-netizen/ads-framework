@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 47% 4%;
+  --foreground: 210 40% 98%;
+  --card: 224 32% 8%;
+  --card-foreground: 210 40% 98%;
+  --border: 217 33% 20%;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+}
