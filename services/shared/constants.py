@@ -78,10 +78,14 @@ ADSET_FIELDS = (
 
 AD_FIELDS = (
     "id,name,adset_id,campaign_id,status,effective_status,configured_status,"
-    "creative{id},created_time,updated_time,tracking_specs,conversion_specs,"
-    "source_ad_id,preview_shareable_link,issues_info,recommendations,"
-    "bid_amount,targeting,last_updated_by_app_id,ad_review_feedback,"
-    "engagement_audience,adlabels,demolink_hash,display_sequence"
+    "creative{id},created_time,updated_time,"
+    "source_ad_id,bid_amount,last_updated_by_app_id,engagement_audience,"
+    "demolink_hash,display_sequence"
+    # Omitted heavy JSONB fields that cause Meta HTTP 500 "reduce data":
+    #   tracking_specs, conversion_specs, targeting — large JSONB per ad
+    #   issues_info, recommendations, ad_review_feedback — JSONB arrays
+    #   preview_shareable_link — not needed for analytics
+    #   adlabels — rarely used
 )
 
 # ---------------------------------------------------------------------------
@@ -89,14 +93,18 @@ AD_FIELDS = (
 # ---------------------------------------------------------------------------
 
 AD_CREATIVE_FIELDS = (
-    "id,name,status,object_type,object_story_spec,object_story_id,title,body,"
+    "id,name,status,object_type,object_story_id,title,body,"
     "image_url,image_hash,video_id,thumbnail_url,call_to_action_type,link_url,"
     "link_destination_display_url,instagram_permalink_url,"
     "effective_instagram_media_id,effective_object_story_id,url_tags,"
-    "template_url,asset_feed_spec,degrees_of_freedom_spec,product_set_id,"
+    "template_url,product_set_id,"
     "use_page_actor_override,authorization_category,"
     "branded_content_sponsor_page_id,contextual_multi_ads,dynamic_ad_voice,"
     "recommender_settings,platform_customizations"
+    # Omitted heavy JSONB fields that cause Meta HTTP 500 "reduce data":
+    #   asset_feed_spec, degrees_of_freedom_spec — DCO/Advantage+ creative specs
+    #   object_story_spec — story/post spec, can be very large for video ads
+    # None of these are needed for Phase 7 scoring. DB columns will be NULL.
 )
 
 # Preview formats from §5.2 loop
@@ -117,29 +125,21 @@ AD_PREVIEW_FORMATS = [
 # §6 — Insights
 # ---------------------------------------------------------------------------
 
-# §6.1 — full ad-level field set
+# §6.1 — ad-level field set (trimmed to avoid Meta HTTP 500 "reduce data")
+# Dropped: video_*, quality_ranking, estimated_ad_recall*, social_spend,
+#          catalog_segment_value, canvas_avg_*, instant_experience_*,
+#          full_view_*, cost_per_unique_*, unique_actions
 INSIGHTS_AD_FIELDS = (
-    "account_id,account_name,account_currency,campaign_id,campaign_name,"
-    "adset_id,adset_name,ad_id,ad_name,objective,buying_type,optimization_goal,"
-    "impressions,reach,frequency,spend,cpm,cpc,cpp,ctr,clicks,unique_clicks,"
-    "inline_link_clicks,inline_link_click_ctr,unique_inline_link_clicks,"
-    "unique_inline_link_click_ctr,outbound_clicks,unique_outbound_clicks,"
-    "outbound_clicks_ctr,actions,action_values,unique_actions,"
-    "cost_per_action_type,cost_per_unique_action_type,"
+    "account_id,campaign_id,adset_id,ad_id,ad_name,objective,buying_type,"
+    "impressions,reach,frequency,spend,cpm,cpc,ctr,clicks,unique_clicks,"
+    "inline_link_clicks,inline_link_click_ctr,"
+    "outbound_clicks,outbound_clicks_ctr,"
+    "actions,action_values,cost_per_action_type,"
     "cost_per_inline_link_click,cost_per_outbound_click,"
-    "cost_per_unique_outbound_click,conversions,conversion_values,"
-    "cost_per_conversion,purchase_roas,website_purchase_roas,"
-    "mobile_app_purchase_roas,video_play_actions,video_p25_watched_actions,"
-    "video_p50_watched_actions,video_p75_watched_actions,"
-    "video_p95_watched_actions,video_p100_watched_actions,"
-    "video_avg_time_watched_actions,video_thruplay_watched_actions,"
-    "video_30_sec_watched_actions,video_continuous_2_sec_watched_actions,"
-    "video_play_curve_actions,cost_per_thruplay,engagement_rate_ranking,"
-    "quality_ranking,conversion_rate_ranking,estimated_ad_recall_rate,"
-    "estimated_ad_recallers,cost_per_estimated_ad_recallers,social_spend,"
-    "catalog_segment_value,attribution_setting,canvas_avg_view_time,"
-    "canvas_avg_view_percent,instant_experience_clicks_to_open,"
-    "instant_experience_clicks_to_start,instant_experience_outbound_clicks,"
+    "conversions,purchase_roas,"
+    "estimated_ad_recall_rate,estimated_ad_recallers,cost_per_estimated_ad_recallers,"
+    "social_spend,canvas_avg_view_time,canvas_avg_view_percent,"
+    "instant_experience_clicks_to_open,instant_experience_clicks_to_start,"
     "full_view_impressions,full_view_reach"
 )
 
@@ -150,7 +150,9 @@ INSIGHTS_BREAKDOWN_FIELDS = (
 )
 
 # §6.3 — adset/campaign/account level field set
+# ID fields must be explicit so Meta includes them in the response
 INSIGHTS_LEVEL_FIELDS = (
+    "account_id,campaign_id,adset_id,"
     "impressions,reach,spend,clicks,ctr,cpm,actions,action_values,"
     "conversions,purchase_roas"
 )

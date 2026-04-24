@@ -110,7 +110,17 @@ class BQClient:
     # ------------------------------------------------------------------
 
     def _wrap(self, pg_sql: str) -> str:
-        """Wrap a Postgres SQL string in EXTERNAL_QUERY."""
-        # Escape single quotes inside the pg_sql for the BQ string literal
-        escaped = pg_sql.replace("\\", "\\\\").replace('"', '\\"')
+        """Wrap a Postgres SQL string in EXTERNAL_QUERY.
+
+        BQ EXTERNAL_QUERY takes a single-line double-quoted string literal, so
+        we must collapse the multiline SQL and escape backslashes, double quotes,
+        and newlines before embedding it.
+        """
+        import re
+        # Strip -- line comments (they'd be fine in Postgres but add noise)
+        stripped = re.sub(r"--[^\n]*", " ", pg_sql)
+        # Collapse whitespace / newlines into single spaces
+        collapsed = " ".join(stripped.split())
+        # Escape for BQ double-quoted string literal
+        escaped = collapsed.replace("\\", "\\\\").replace('"', '\\"')
         return f'SELECT * FROM EXTERNAL_QUERY("{_BQ_CONNECTION}", "{escaped}")'

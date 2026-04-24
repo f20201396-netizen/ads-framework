@@ -57,7 +57,8 @@ from services.shared.rate_limiter import RateLimiter
 log = logging.getLogger(__name__)
 
 # Meta transient error codes — safe to retry
-_META_RETRYABLE = {1, 2, 4, 17, 32, 613}
+# 80004 = Ads Management API rate limit (HTTP 400, distinct from 429)
+_META_RETRYABLE = {1, 2, 4, 17, 32, 613, 80004}
 
 # Threshold beyond which get_insights() submits an async report job
 _ASYNC_REPORT_THRESHOLD_DEFAULT = 30
@@ -117,11 +118,20 @@ class MetaClient:
         http_client: httpx.AsyncClient,
         rate_limiter: RateLimiter,
         base_url: str = BASE_URL,
+        app_secret: str = "",
     ) -> None:
         self._token = access_token
         self._http = http_client
         self._rl = rate_limiter
         self._base = base_url.rstrip("/")
+        # appsecret_proof = HMAC-SHA256(access_token, app_secret) — required for server calls
+        if app_secret:
+            import hashlib, hmac
+            self._appsecret_proof: str = hmac.new(
+                app_secret.encode(), access_token.encode(), hashlib.sha256
+            ).hexdigest()  # HMAC-SHA256(app_secret, access_token)
+        else:
+            self._appsecret_proof = ""
 
     # ------------------------------------------------------------------ #
     # §1 — Business Manager + Ad Accounts                                  #
@@ -180,16 +190,18 @@ class MetaClient:
     async def list_adsets(
         self,
         ad_account_id: str,
-        statuses: list[str] = ALL_STATUSES,
+        statuses: list[str] | None = None,
     ) -> AsyncIterator[dict]:
-        """§3 — All ad sets."""
-        status_filter = json.dumps(
-            [{"field": "effective_status", "operator": "IN", "value": statuses}]
+        """§3 — Most-recent 500 live ad sets, single API call, no pagination."""
+        live = statuses or ["ACTIVE", "PAUSED", "IN_PROCESS", "WITH_ISSUES"]
+        filtering = json.dumps([
+            {"field": "effective_status", "operator": "IN", "value": live},
+        ])
+        data = await self._request(
+            f"{self._base}/{ad_account_id}/adsets",
+            {"fields": ADSET_FIELDS, "filtering": filtering, "limit": 500},
         )
-        async for item in self._paginate(
-            f"{ad_account_id}/adsets",
-            {"fields": ADSET_FIELDS, "filtering": status_filter, "limit": 500},
-        ):
+        for item in data.get("data", []):
             yield item
 
     # ------------------------------------------------------------------ #
@@ -199,16 +211,22 @@ class MetaClient:
     async def list_ads(
         self,
         ad_account_id: str,
-        statuses: list[str] = ALL_STATUSES,
+        statuses: list[str] | None = None,
     ) -> AsyncIterator[dict]:
-        """§4 — All ads."""
-        status_filter = json.dumps(
-            [{"field": "effective_status", "operator": "IN", "value": statuses}]
+        """§4 — Live ads (ACTIVE/PAUSED/WITH_ISSUES/IN_PROCESS only).
+
+        Same rationale as list_adsets — excludes DELETED/ARCHIVED to stay
+        within the 200-call/hour rate limit.
+        """
+        live = statuses or ["ACTIVE", "PAUSED", "IN_PROCESS", "WITH_ISSUES"]
+        filtering = json.dumps([
+            {"field": "effective_status", "operator": "IN", "value": live},
+        ])
+        data = await self._request(
+            f"{self._base}/{ad_account_id}/ads",
+            {"fields": AD_FIELDS, "filtering": filtering, "limit": 500},
         )
-        async for item in self._paginate(
-            f"{ad_account_id}/ads",
-            {"fields": AD_FIELDS, "filtering": status_filter, "limit": 500},
-        ):
+        for item in data.get("data", []):
             yield item
 
     # ------------------------------------------------------------------ #
@@ -219,7 +237,7 @@ class MetaClient:
         """§5.1 — All creatives."""
         async for item in self._paginate(
             f"{ad_account_id}/adcreatives",
-            {"fields": AD_CREATIVE_FIELDS, "limit": 200},
+            {"fields": AD_CREATIVE_FIELDS, "limit": 25},  # wide field list — keep small
         ):
             yield item
 
@@ -266,8 +284,8 @@ class MetaClient:
             "time_range": json.dumps(time_range),
             "fields": fields,
             "action_attribution_windows": json.dumps(action_attribution_windows),
-            "action_breakdowns": json.dumps(ACTION_BREAKDOWNS),
-            "limit": 1000,
+            "action_breakdowns": json.dumps(["action_type"]),
+            "limit": 500,
         }
         if breakdowns is not None:
             params["breakdowns"] = (
@@ -452,10 +470,12 @@ class MetaClient:
         Always injects access_token so callers don't have to.
         """
         p = {"access_token": self._token, **(params or {})}
+        if self._appsecret_proof:
+            p["appsecret_proof"] = self._appsecret_proof
         async for attempt in AsyncRetrying(
             retry=retry_if_exception(_is_retryable),
             wait=wait_exponential(multiplier=2, min=4, max=120),
-            stop=stop_after_attempt(6),
+            stop=stop_after_attempt(10),  # raised from 6 — adcreatives cursor pages have transient 500 bursts
             reraise=True,
         ):
             with attempt:
@@ -466,7 +486,11 @@ class MetaClient:
                         err = resp.json().get("error", {})
                     except Exception:
                         err = {"message": resp.text}
-                    raise MetaAPIError(resp.status_code, err)
+                    exc = MetaAPIError(resp.status_code, err)
+                    log.warning("Meta API error: HTTP %d code=%d msg=%r (attempt %d)",
+                                resp.status_code, exc.code, exc.message,
+                                attempt.retry_state.attempt_number)
+                    raise exc
                 return resp.json()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
@@ -477,16 +501,25 @@ class MetaClient:
         self,
         path: str,
         params: dict | None = None,
+        page_delay: float = 1.0,
     ) -> AsyncIterator[dict]:
         """
         Auto-paginate a list endpoint, following paging.next until exhausted.
         Mirrors the bash paginate() helper in the curl script.
+
+        page_delay: seconds to sleep between pages (default 1 s) to avoid
+        code-17 "User request limit reached" bursting.
         """
+        import asyncio
         url: str = f"{self._base}/{path.lstrip('/')}"
         # First call uses provided params; subsequent calls use the full paging.next
         # URL which already contains all query params — we still inject access_token.
         current_params: dict | None = params
+        first = True
         while url:
+            if not first and page_delay > 0:
+                await asyncio.sleep(page_delay)
+            first = False
             data = await self._request(url, current_params)
             for item in data.get("data", []):
                 yield item
@@ -512,9 +545,12 @@ class MetaClient:
         # Step 1 — submit
         log.info("Submitting async report job for %s", object_id)
         post_url = f"{self._base}/{object_id}/insights"
+        post_data = {"access_token": self._token, **params}
+        if self._appsecret_proof:
+            post_data["appsecret_proof"] = self._appsecret_proof
         resp = await self._http.post(
             post_url,
-            data={"access_token": self._token, **params},
+            data=post_data,
             timeout=60,
         )
         await self._rl.record(resp.headers, post_url)

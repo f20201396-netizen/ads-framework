@@ -9,6 +9,7 @@ Individual event rows are served from attribution_events for drill-down.
 """
 
 import logging
+from datetime import date as _date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -60,7 +61,7 @@ async def get_campaign_conversions(
     offset = decode_cursor(cursor)
 
     where = "WHERE install_date >= :since AND install_date <= :until"
-    params: dict[str, Any] = {"since": since, "until": until}
+    params: dict[str, Any] = {"since": _date.fromisoformat(since), "until": _date.fromisoformat(until)}
 
     if campaign_id:
         where += " AND campaign_id = :campaign_id"
@@ -104,7 +105,7 @@ async def get_adset_conversions(
     offset = decode_cursor(cursor)
 
     where = "WHERE install_date >= :since AND install_date <= :until"
-    params: dict[str, Any] = {"since": since, "until": until}
+    params: dict[str, Any] = {"since": _date.fromisoformat(since), "until": _date.fromisoformat(until)}
 
     if adset_id:
         where += " AND adset_id = :adset_id"
@@ -170,10 +171,10 @@ async def list_events(
         params["network"] = network
     if since:
         conditions.append("install_date >= :since")
-        params["since"] = since
+        params["since"] = _date.fromisoformat(since)
     if until:
         conditions.append("install_date <= :until")
-        params["until"] = until
+        params["until"] = _date.fromisoformat(until)
     if not include_reattributed:
         conditions.append("is_reattributed = FALSE")
 
@@ -252,10 +253,133 @@ async def get_summary(
               AND install_date >= :since
               AND install_date <= :until
         """),
-        {"object_id": object_id, "since": since, "until": until},
+        {"object_id": object_id, "since": _date.fromisoformat(since), "until": _date.fromisoformat(until)},
     )
     result = dict(row.mappings().one())
     return {"level": level, "object_id": object_id, "since": since, "until": until, **result}
+
+
+# ---------------------------------------------------------------------------
+# /conversions/platform-roas  — M0 ROAS split by Android / iOS
+# ---------------------------------------------------------------------------
+
+@router.get("/platform-roas", summary="M0 ROAS split by platform (Android/iOS)")
+async def get_platform_roas(
+    since: str = Query(..., description="YYYY-MM-DD (install_date lower bound)"),
+    until: str = Query(..., description="YYYY-MM-DD (install_date upper bound)"),
+    campaign_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Groups attribution_events by platform (Android / iOS) and computes:
+      - signups, d0/d6/m0 conversions, m0_revenue_inr, total_revenue_inr
+      - allocated_spend  (Singular MMP cost per OS for the same period)
+      - m0_roas          = m0_revenue_inr / allocated_spend
+
+    'm0' = revenue from that period's signups paid within the same calendar period
+           (event_time within [since, until], same bounds as install_date).
+    """
+    params: dict[str, Any] = {
+        "since": _date.fromisoformat(since),
+        "until": _date.fromisoformat(until),
+    }
+    campaign_filter = ""
+    if campaign_id:
+        campaign_filter = "AND meta_campaign_id = :campaign_id"
+        params["campaign_id"] = campaign_id
+
+    rows = await db.execute(
+        text(f"""
+            WITH conv AS (
+                SELECT
+                    -- Platform: use user_devices.os as PRIMARY (actual device), fall back to Singular.
+                    -- Singular sets platform='Android' for all Facebook users regardless of
+                    -- actual device, so user_devices.os gives the true iOS/Android split.
+                    COALESCE(
+                        CASE
+                            WHEN LOWER(ud.os) LIKE 'ios%%' OR LOWER(ud.os) = 'ipados' THEN 'iOS'
+                            WHEN LOWER(ud.os) LIKE 'android%%' THEN 'Android'
+                        END,
+                        ae.platform
+                    )                                                                        AS platform,
+                    COUNT(DISTINCT CASE WHEN ae.event_name = 'signup'
+                                        THEN ae.user_id END)                                 AS signups,
+                    COUNT(DISTINCT CASE WHEN ae.event_name IN ('conversion','repeat_conversion')
+                                         AND ae.days_since_signup = 0
+                                        THEN ae.user_id END)                                 AS d0_conversions,
+                    COUNT(DISTINCT CASE WHEN ae.event_name IN ('conversion','repeat_conversion')
+                                         AND ae.days_since_signup <= 6
+                                        THEN ae.user_id END)                                 AS d6_conversions,
+                    COUNT(DISTINCT CASE WHEN ae.event_name IN ('conversion','repeat_conversion')
+                                         AND DATE(ae.event_time) >= :since
+                                         AND DATE(ae.event_time) <= :until
+                                        THEN ae.user_id END)                                 AS m0_conversions,
+                    SUM(CASE WHEN ae.event_name IN ('conversion','repeat_conversion')
+                              AND DATE(ae.event_time) >= :since
+                              AND DATE(ae.event_time) <= :until
+                             THEN ae.revenue_inr ELSE 0 END)                                 AS m0_revenue_inr,
+                    SUM(CASE WHEN ae.event_name IN ('conversion','repeat_conversion')
+                             THEN ae.revenue_inr ELSE 0 END)                                 AS total_revenue_inr
+                FROM attribution_events ae
+                LEFT JOIN user_devices ud ON ud.user_id = ae.user_id
+                WHERE ae.network = 'Facebook'
+                  AND ae.is_reattributed = FALSE
+                  AND ae.install_date >= :since
+                  AND ae.install_date <= :until
+                  {campaign_filter}
+                GROUP BY 1
+            ),
+            platform_spend AS (
+                -- Direct per-OS spend from Singular MMP — no proportional allocation needed.
+                SELECT
+                    os AS platform,
+                    COALESCE(SUM(cost), 0) AS spend
+                FROM singular_campaign_metrics
+                WHERE source = 'Facebook'
+                  AND os IN ('Android', 'iOS')
+                  AND date >= :since
+                  AND date <= :until
+                GROUP BY os
+            )
+            SELECT
+                c.platform,
+                c.signups,
+                c.d0_conversions,
+                c.d6_conversions,
+                c.m0_conversions,
+                ROUND(c.m0_revenue_inr::numeric, 2)                                          AS m0_revenue_inr,
+                ROUND(c.total_revenue_inr::numeric, 2)                                       AS total_revenue_inr,
+                COALESCE(ROUND(ps.spend::numeric, 2), 0)                                     AS allocated_spend,
+                ROUND(
+                    c.m0_revenue_inr / NULLIF(ps.spend, 0),
+                    4
+                )                                                                            AS m0_roas,
+                ROUND(
+                    c.m0_conversions * 100.0 / NULLIF(c.signups, 0), 2
+                )                                                                            AS m0_conversion_pct,
+                ROUND(
+                    c.total_revenue_inr / NULLIF(ps.spend, 0),
+                    4
+                )                                                                            AS total_roas
+            FROM conv c
+            LEFT JOIN platform_spend ps ON ps.platform = c.platform
+            ORDER BY signups DESC
+        """),
+        params,
+    )
+
+    data = [dict(r._mapping) for r in rows]
+    return {
+        "since": since,
+        "until": until,
+        "campaign_id": campaign_id,
+        "note": (
+            "M0 = revenue from period signups paid within [since, until]. "
+            "Platform via user_devices.os (PRIMARY) falling back to Singular. "
+            "Spend from singular_campaign_metrics (Singular MMP) per OS."
+        ),
+        "data": data,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +399,10 @@ async def get_bq_costs(
     params: dict[str, Any] = {}
     if since:
         conditions.append("DATE(run_at) >= :since")
-        params["since"] = since
+        params["since"] = _date.fromisoformat(since)
     if until:
         conditions.append("DATE(run_at) <= :until")
-        params["until"] = until
+        params["until"] = _date.fromisoformat(until)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     total_row = await db.execute(

@@ -227,6 +227,7 @@ def upgrade():
                          THEN revenue_inr ELSE 0 END)                          AS total_revenue_inr
             FROM attribution_events
             WHERE meta_adset_id IS NOT NULL
+              AND meta_adset_id != 'N/A'
             GROUP BY 1, 2, 3
         ),
         spend AS (

@@ -35,6 +35,7 @@ async def sync_account_structure() -> None:
             rl = RateLimiter(db_factory=AsyncSessionLocal, account_id=account_id)
             client = MetaClient(
                 access_token=settings.meta_access_token,
+                app_secret=settings.meta_app_secret,
                 http_client=http,
                 rate_limiter=rl,
             )
@@ -60,6 +61,24 @@ async def _sync_one_account(client: MetaClient, account_id: str) -> None:
     async with track_run("ad_accounts", account_id) as run:
         owned = await client.list_owned_ad_accounts(business_id)
         client_accts = await client.list_client_ad_accounts(business_id)
+        all_raw_accounts = owned + client_accts
+
+        # System-user tokens often return 0 from me/businesses but each
+        # ad account carries a nested "business" object — use that as fallback.
+        if not raw_biz_list:
+            seen_biz: set[str] = set()
+            fallback_biz_rows = []
+            for acct in all_raw_accounts:
+                biz = acct.get("business") or {}
+                biz_id = biz.get("id")
+                if biz_id and biz_id not in seen_biz:
+                    seen_biz.add(biz_id)
+                    fallback_biz_rows.append(parse_business(biz))
+            if fallback_biz_rows:
+                async with AsyncSessionLocal() as session:
+                    await upsert_dims(session, _models().Business, fallback_biz_rows)
+                    log.info("businesses: seeded %d from ad_account.business fields", len(fallback_biz_rows))
+
         rows = [parse_ad_account(a, is_client=False) for a in owned] + \
                [parse_ad_account(a, is_client=True) for a in client_accts]
         async with AsyncSessionLocal() as session:
@@ -77,23 +96,20 @@ async def _sync_one_account(client: MetaClient, account_id: str) -> None:
             await upsert_dims(session, _models().Campaign, rows)
 
     # ------------------------------------------------------------------ #
-    # ad_creatives (before ads so FK is satisfied)                         #
+    # ad_creatives — skipped in this run; FK was dropped temporarily.     #
+    # Run sync_creatives_only() separately with the lean field set.        #
     # ------------------------------------------------------------------ #
-    async with track_run("ad_creatives", account_id) as run:
-        rows = []
-        async for item in client.list_creatives(account_id):
-            rows.append(parse_creative(item, account_id))
-            run.rows_upserted += 1
-        async with AsyncSessionLocal() as session:
-            await upsert_dims(session, _models().AdCreative, rows)
 
     # ------------------------------------------------------------------ #
     # adsets                                                               #
     # ------------------------------------------------------------------ #
+    synced_adset_ids: set[str] = set()
     async with track_run("adsets", account_id) as run:
         rows = []
         async for item in client.list_adsets(account_id):
-            rows.append(parse_adset(item, account_id))
+            parsed = parse_adset(item, account_id)
+            rows.append(parsed)
+            synced_adset_ids.add(parsed["id"])
             run.rows_upserted += 1
         async with AsyncSessionLocal() as session:
             await upsert_dims(session, _models().AdSet, rows)
@@ -103,9 +119,16 @@ async def _sync_one_account(client: MetaClient, account_id: str) -> None:
     # ------------------------------------------------------------------ #
     async with track_run("ads", account_id) as run:
         rows = []
+        skipped = 0
         async for item in client.list_ads(account_id):
-            rows.append(parse_ad(item, account_id))
+            parsed = parse_ad(item, account_id)
+            if parsed.get("adset_id") not in synced_adset_ids:
+                skipped += 1
+                continue
+            rows.append(parsed)
             run.rows_upserted += 1
+        if skipped:
+            log.info("ads: skipped %d ads whose adset_id is not in synced set", skipped)
         async with AsyncSessionLocal() as session:
             await upsert_dims(session, _models().Ad, rows)
 

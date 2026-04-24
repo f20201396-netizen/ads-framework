@@ -41,18 +41,28 @@ SELECT
     (uad.is_viewthrough = '1')                                   AS is_viewthrough,
 
     -- Device / geo
-    uad.platform,
+    -- user_devices.os is PRIMARY: Singular sets platform='Android' for all Facebook users
+    -- regardless of actual device; ud.os gives the true iOS/Android split.
+    -- Fall back to Singular uad.platform for users not in user_devices.
+    COALESCE(
+        CASE
+            WHEN LOWER(ud.os) LIKE 'ios%' OR LOWER(ud.os) = 'ipados' THEN 'iOS'
+            WHEN LOWER(ud.os) LIKE 'android%' THEN 'Android'
+        END,
+        uad.platform
+    )                                                            AS platform,
     uad.os_version,
     uad.device_brand,
     uad.device_model,
 
-    -- User quality tier (PAYMENT-P0, PAYMENT-P1, etc.)
-    uad.priority,
+    -- User quality tier (PAYMENT-P0, PAYMENT-P1, etc.) — lives on users table
+    u.priority,
 
     'user_additional_details'                                    AS source_table
 
 FROM users u
 LEFT JOIN user_additional_details uad ON uad.user_id = u.id
+LEFT JOIN user_devices             ud  ON ud.user_id  = u.id
 WHERE u.created_at >= '{since}'
   AND u.created_at <  '{until}'
 ORDER BY u.created_at

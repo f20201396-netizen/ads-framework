@@ -8,6 +8,7 @@ top         — ranked entities by a single metric over a period
 """
 
 import logging
+from datetime import date as _date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -119,8 +120,8 @@ async def get_timeseries(
         select(model)
         .where(
             id_attr == object_id,
-            model.date >= since,
-            model.date <= until,
+            model.date >= _date.fromisoformat(since),
+            model.date <= _date.fromisoformat(until),
             model.attribution_window == attribution_window,
         )
         .order_by(model.date)
@@ -168,8 +169,8 @@ async def get_breakdown(
         select(InsightsDailyBreakdown)
         .where(
             filter_col == object_id,
-            InsightsDailyBreakdown.date >= since,
-            InsightsDailyBreakdown.date <= until,
+            InsightsDailyBreakdown.date >= _date.fromisoformat(since),
+            InsightsDailyBreakdown.date <= _date.fromisoformat(until),
             InsightsDailyBreakdown.breakdown_type == breakdown_type,
             InsightsDailyBreakdown.attribution_window == attribution_window,
         )
@@ -220,8 +221,8 @@ async def compare_ranges(
             select(model)
             .where(
                 id_attr == object_id,
-                model.date >= since,
-                model.date <= until,
+                model.date >= _date.fromisoformat(since),
+                model.date <= _date.fromisoformat(until),
                 model.attribution_window == attribution_window,
             )
             .order_by(model.date)
@@ -295,8 +296,8 @@ async def get_top(
         select(id_attr, func.sum(metric_col).label(metric))
         .where(
             parent_col == parent_id,
-            model.date >= since,
-            model.date <= until,
+            model.date >= _date.fromisoformat(since),
+            model.date <= _date.fromisoformat(until),
             model.attribution_window == attribution_window,
         )
         .group_by(id_attr)

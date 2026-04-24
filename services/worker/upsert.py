@@ -22,7 +22,14 @@ from services.shared.models import SyncRun
 log = logging.getLogger(__name__)
 
 UTC = timezone.utc
-_CHUNK = 500  # rows per INSERT statement (keeps pg param count safe)
+_CHUNK = 500  # rows per INSERT for narrow tables
+_PG_MAX_PARAMS = 32000  # asyncpg hard limit is 32767; stay safely below
+
+
+def _chunk_size(row: dict) -> int:
+    """Compute max rows per INSERT so we never exceed asyncpg's 32767-param limit."""
+    ncols = len(row)
+    return max(1, _PG_MAX_PARAMS // ncols)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +114,7 @@ async def upsert_dims(
         return 0
     pk = pk or ["id"]
     total = 0
-    for chunk in _chunks(rows, _CHUNK):
+    for chunk in _chunks(rows, _chunk_size(rows[0])):
         stmt = pg_insert(model).values(chunk)
         skip = set(pk) | {"created_at"}
         update = {k: stmt.excluded[k] for k in chunk[0] if k not in skip}
@@ -135,8 +142,15 @@ async def upsert_facts(
     if not rows:
         return 0
     pk_set = set(pk)
+    # Deduplicate within the batch by PK (last row wins) to avoid
+    # "ON CONFLICT DO UPDATE cannot affect row a second time"
+    seen: dict[tuple, dict] = {}
+    for row in rows:
+        key = tuple(row.get(k) for k in pk)
+        seen[key] = row
+    rows = list(seen.values())
     total = 0
-    for chunk in _chunks(rows, _CHUNK):
+    for chunk in _chunks(rows, _chunk_size(rows[0])):
         stmt = pg_insert(model).values(chunk)
         update = {k: stmt.excluded[k] for k in chunk[0] if k not in pk_set}
         update["synced_at"] = func.now()

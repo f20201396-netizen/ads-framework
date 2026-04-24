@@ -142,6 +142,7 @@ async def get_adset(adset_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/ads", response_model=Paginated[AdOut])
 async def list_ads(
     adset_id: str | None = Query(None),
+    campaign_id: str | None = Query(None),
     status: str | None = Query(None),
     limit: int = Query(_DEFAULT_LIMIT, le=_MAX_LIMIT),
     cursor: str | None = Query(None),
@@ -151,6 +152,8 @@ async def list_ads(
     stmt = select(Ad)
     if adset_id:
         stmt = stmt.where(Ad.adset_id == adset_id)
+    if campaign_id:
+        stmt = stmt.where(Ad.campaign_id == campaign_id)
     if status:
         stmt = stmt.where(Ad.effective_status == status.upper())
 
@@ -210,6 +213,7 @@ async def get_creative_preview(
         rl = RateLimiter(db_factory=AsyncSessionLocal)
         client = MetaClient(
             access_token=settings.meta_access_token,
+            app_secret=settings.meta_app_secret,
             http_client=http,
             rate_limiter=rl,
         )

@@ -10,11 +10,30 @@ Rules:
 
 import hashlib
 import json
+from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------
 # Type coercion micro-helpers
 # ---------------------------------------------------------------------------
+
+def _dt(v) -> datetime | None:
+    """Parse a Meta API timestamp string → timezone-aware datetime.
+
+    Meta returns ISO 8601 strings in two formats:
+      '2026-02-16T19:53:45+0000'   (UTC offset without colon)
+      '2023-02-10T21:09:15+0530'   (IST offset without colon)
+    Python 3.11+ fromisoformat() handles both. Falls back to UTC NOW on error.
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(v))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 def _i(v) -> int | None:
     try:
@@ -38,6 +57,21 @@ def _b(v) -> bool | None:
     return str(v).lower() in ("true", "1", "yes")
 
 
+def _s(v) -> str | None:
+    """Coerce to str — handles Meta returning budget/bid fields as int or str."""
+    if v is None:
+        return None
+    return str(v)
+
+
+def _act(v: str | None) -> str | None:
+    """Normalise Meta account ID — always ensure 'act_' prefix."""
+    if v is None:
+        return None
+    s = str(v)
+    return s if s.startswith("act_") else f"act_{s}"
+
+
 # ---------------------------------------------------------------------------
 # Dimension parsers
 # ---------------------------------------------------------------------------
@@ -50,7 +84,7 @@ def parse_business(raw: dict) -> dict:
         "timezone_id": str(raw["timezone_id"]) if raw.get("timezone_id") else None,
         "vertical": raw.get("vertical"),
         "primary_page": raw.get("primary_page"),
-        "created_time": raw.get("created_time"),
+        "created_time": _dt(raw.get("created_time")),
         "raw": raw,
     }
 
@@ -99,8 +133,8 @@ def parse_ad_account(raw: dict, is_client: bool = False) -> dict:
         "media_agency": raw.get("media_agency"),
         "partner": raw.get("partner"),
         "funding_source": raw.get("funding_source"),
-        "user_access_expire_time": raw.get("user_access_expire_time"),
-        "created_time": raw.get("created_time"),
+        "user_access_expire_time": _dt(raw.get("user_access_expire_time")),
+        "created_time": _dt(raw.get("created_time")),
         # JSONB
         "rf_spec": raw.get("rf_spec"),
         "funding_source_details": raw.get("funding_source_details"),
@@ -126,20 +160,20 @@ def parse_campaign(raw: dict, account_id: str) -> dict:
         "objective": raw.get("objective"),
         "buying_type": raw.get("buying_type"),
         "bid_strategy": raw.get("bid_strategy"),
-        "daily_budget": raw.get("daily_budget"),
-        "lifetime_budget": raw.get("lifetime_budget"),
-        "budget_remaining": raw.get("budget_remaining"),
-        "spend_cap": raw.get("spend_cap"),
-        "start_time": raw.get("start_time"),
-        "stop_time": raw.get("stop_time"),
+        "daily_budget": _s(raw.get("daily_budget")),
+        "lifetime_budget": _s(raw.get("lifetime_budget")),
+        "budget_remaining": _s(raw.get("budget_remaining")),
+        "spend_cap": _s(raw.get("spend_cap")),
+        "start_time": _dt(raw.get("start_time")),
+        "stop_time": _dt(raw.get("stop_time")),
         "source_campaign_id": raw.get("source_campaign_id"),
         "is_skadnetwork_attribution": _b(raw.get("is_skadnetwork_attribution")),
         "smart_promotion_type": raw.get("smart_promotion_type"),
-        "last_budget_toggling_time": raw.get("last_budget_toggling_time"),
+        "last_budget_toggling_time": _dt(raw.get("last_budget_toggling_time")),
         "can_use_spend_cap": _b(raw.get("can_use_spend_cap")),
         "can_create_brand_lift_study": _b(raw.get("can_create_brand_lift_study")),
-        "created_time": raw.get("created_time"),
-        "updated_time": raw.get("updated_time"),
+        "created_time": _dt(raw.get("created_time")),
+        "updated_time": _dt(raw.get("updated_time")),
         # JSONB
         "special_ad_categories": raw.get("special_ad_categories"),
         "special_ad_category_country": raw.get("special_ad_category_country"),
@@ -160,10 +194,10 @@ def parse_adset(raw: dict, account_id: str) -> dict:
         "status": raw.get("status"),
         "effective_status": raw.get("effective_status"),
         "configured_status": raw.get("configured_status"),
-        "daily_budget": raw.get("daily_budget"),
-        "lifetime_budget": raw.get("lifetime_budget"),
-        "budget_remaining": raw.get("budget_remaining"),
-        "bid_amount": raw.get("bid_amount"),
+        "daily_budget": _s(raw.get("daily_budget")),
+        "lifetime_budget": _s(raw.get("lifetime_budget")),
+        "budget_remaining": _s(raw.get("budget_remaining")),
+        "bid_amount": _s(raw.get("bid_amount")),
         "bid_strategy": raw.get("bid_strategy"),
         "billing_event": raw.get("billing_event"),
         "optimization_goal": raw.get("optimization_goal"),
@@ -172,15 +206,15 @@ def parse_adset(raw: dict, account_id: str) -> dict:
         "use_new_app_click": _b(raw.get("use_new_app_click")),
         "rf_prediction_id": raw.get("rf_prediction_id"),
         "is_dynamic_creative": _b(raw.get("is_dynamic_creative")),
-        "lifetime_min_spend_target": raw.get("lifetime_min_spend_target"),
-        "lifetime_spend_cap": raw.get("lifetime_spend_cap"),
-        "daily_min_spend_target": raw.get("daily_min_spend_target"),
-        "daily_spend_cap": raw.get("daily_spend_cap"),
+        "lifetime_min_spend_target": _s(raw.get("lifetime_min_spend_target")),
+        "lifetime_spend_cap": _s(raw.get("lifetime_spend_cap")),
+        "daily_min_spend_target": _s(raw.get("daily_min_spend_target")),
+        "daily_spend_cap": _s(raw.get("daily_spend_cap")),
         "multi_optimization_goal_weight": raw.get("multi_optimization_goal_weight"),
-        "start_time": raw.get("start_time"),
-        "end_time": raw.get("end_time"),
-        "created_time": raw.get("created_time"),
-        "updated_time": raw.get("updated_time"),
+        "start_time": _dt(raw.get("start_time")),
+        "end_time": _dt(raw.get("end_time")),
+        "created_time": _dt(raw.get("created_time")),
+        "updated_time": _dt(raw.get("updated_time")),
         # JSONB
         "targeting": raw.get("targeting"),
         "targeting_optimization_types": raw.get("targeting_optimization_types"),
@@ -212,13 +246,13 @@ def parse_ad(raw: dict, account_id: str) -> dict:
         "configured_status": raw.get("configured_status"),
         "source_ad_id": raw.get("source_ad_id"),
         "preview_shareable_link": raw.get("preview_shareable_link"),
-        "bid_amount": raw.get("bid_amount"),
+        "bid_amount": _s(raw.get("bid_amount")),
         "last_updated_by_app_id": raw.get("last_updated_by_app_id"),
         "engagement_audience": _b(raw.get("engagement_audience")),
         "demolink_hash": raw.get("demolink_hash"),
         "display_sequence": _i(raw.get("display_sequence")),
-        "created_time": raw.get("created_time"),
-        "updated_time": raw.get("updated_time"),
+        "created_time": _dt(raw.get("created_time")),
+        "updated_time": _dt(raw.get("updated_time")),
         # JSONB
         "tracking_specs": raw.get("tracking_specs"),
         "conversion_specs": raw.get("conversion_specs"),
@@ -281,9 +315,9 @@ def parse_custom_audience(raw: dict, account_id: str) -> dict:
         "customer_file_source": raw.get("customer_file_source"),
         "retention_days": _i(raw.get("retention_days")),
         "rule_aggregation": raw.get("rule_aggregation"),
-        "time_created": raw.get("time_created"),
-        "time_updated": raw.get("time_updated"),
-        "time_content_updated": raw.get("time_content_updated"),
+        "time_created": _dt(raw.get("time_created")),
+        "time_updated": _dt(raw.get("time_updated")),
+        "time_content_updated": _dt(raw.get("time_content_updated")),
         "opt_out_link": raw.get("opt_out_link"),
         "is_value_based": _b(raw.get("is_value_based")),
         "pixel_id": raw.get("pixel_id"),
@@ -307,14 +341,14 @@ def parse_pixel(raw: dict, account_id: str) -> dict:
         "account_id": account_id,
         "name": raw.get("name"),
         "code": raw.get("code"),
-        "last_fired_time": raw.get("last_fired_time"),
+        "last_fired_time": _dt(raw.get("last_fired_time")),
         "is_created_by_business": _b(raw.get("is_created_by_business")),
         "is_unavailable": _b(raw.get("is_unavailable")),
         "data_use_setting": raw.get("data_use_setting"),
         "first_party_cookie_status": raw.get("first_party_cookie_status"),
         "enable_automatic_matching": _b(raw.get("enable_automatic_matching")),
         "can_proxy": _b(raw.get("can_proxy")),
-        "creation_time": raw.get("creation_time"),
+        "creation_time": _dt(raw.get("creation_time")),
         # JSONB
         "automatic_matching_fields": raw.get("automatic_matching_fields"),
         "owner_business": raw.get("owner_business"),
@@ -334,9 +368,9 @@ def parse_custom_conversion(raw: dict, account_id: str) -> dict:
         "event_source_type": raw.get("event_source_type"),
         "aggregation_rule": raw.get("aggregation_rule"),
         "retention_days": _i(raw.get("retention_days")),
-        "creation_time": raw.get("creation_time"),
-        "first_fired_time": raw.get("first_fired_time"),
-        "last_fired_time": raw.get("last_fired_time"),
+        "creation_time": _dt(raw.get("creation_time")),
+        "first_fired_time": _dt(raw.get("first_fired_time")),
+        "last_fired_time": _dt(raw.get("last_fired_time")),
         "is_archived": _b(raw.get("is_archived")),
         "is_unavailable": _b(raw.get("is_unavailable")),
         # JSONB
@@ -393,11 +427,12 @@ def parse_product_feed(raw: dict, catalog_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def parse_insight_ad(raw: dict, attribution_window: str) -> dict:
+    from datetime import date as _date
     return {
-        "ad_id": raw["ad_id"],
-        "date": raw["date_start"],
+        "ad_id": raw.get("ad_id"),
+        "date": _date.fromisoformat(raw["date_start"]),
         "attribution_window": attribution_window,
-        "account_id": raw.get("account_id"),
+        "account_id": _act(raw.get("account_id")),
         "campaign_id": raw.get("campaign_id"),
         "adset_id": raw.get("adset_id"),
         "account_name": raw.get("account_name"),
@@ -479,7 +514,7 @@ def parse_insight_breakdown(raw: dict, breakdown_type: str, attribution_window: 
     ).hexdigest()
     return {
         "ad_id": raw["ad_id"],
-        "date": raw["date_start"],
+        "date": __import__("datetime").date.fromisoformat(raw["date_start"]),
         "attribution_window": attribution_window,
         "breakdown_type": breakdown_type,
         "breakdown_key_hash": key_hash,
@@ -503,10 +538,11 @@ def parse_insight_breakdown(raw: dict, breakdown_type: str, attribution_window: 
 def parse_insight_level(raw: dict, level_id_col: str, level_id: str, attribution_window: str) -> dict:
     """Parser for adset/campaign/account level insights."""
     return {
-        level_id_col: raw.get(level_id_col, level_id),
-        "date": raw["date_start"],
+        level_id_col: (_act(raw.get(level_id_col)) if level_id_col == "account_id" else raw.get(level_id_col)) or level_id,
+        "date": __import__("datetime").date.fromisoformat(raw["date_start"]),
         "attribution_window": attribution_window,
-        "account_id": raw.get("account_id"),
+        # Don't overwrite level_id_col when it IS account_id
+        **({"account_id": _act(raw.get("account_id")) or level_id} if level_id_col != "account_id" else {}),
         **({"campaign_id": raw.get("campaign_id")} if level_id_col == "adset_id" else {}),
         "impressions": _i(raw.get("impressions")),
         "reach": _i(raw.get("reach")),

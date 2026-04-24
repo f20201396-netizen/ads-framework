@@ -23,12 +23,16 @@ from services.worker.jobs.sync_attribution import (
     refresh_conversion_mv,
     sync_attribution_conversions,
     sync_attribution_signups,
+    sync_singular_campaign_metrics,
+    sync_user_devices,
 )
 from services.worker.jobs.sync_aux import sync_audiences_pixels_catalogs, sync_pixel_stats
 from services.worker.jobs.sync_breakdowns import sync_insights_breakdowns
 from services.worker.jobs.sync_higher_levels import sync_insights_higher_levels
 from services.worker.jobs.sync_insights import sync_insights_daily
 from services.worker.jobs.sync_structure import sync_account_structure
+from services.worker.jobs.sync_google_structure import sync_google_structure
+from services.worker.jobs.sync_google_insights import sync_google_insights_daily
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +137,38 @@ async def main() -> None:
         refresh_conversion_mv,
         IntervalTrigger(hours=1),
         id="refresh_conversion_mv",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Phase 7: prod mirrors for platform detection + Singular spend
+    scheduler.add_job(
+        sync_user_devices,
+        IntervalTrigger(hours=6),
+        id="sync_user_devices",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        sync_singular_campaign_metrics,
+        CronTrigger(hour=4, minute=0, timezone="UTC"),
+        id="sync_singular_campaign_metrics",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Google Ads
+    scheduler.add_job(
+        sync_google_structure,
+        IntervalTrigger(minutes=30),
+        id="sync_google_structure",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        sync_google_insights_daily,
+        IntervalTrigger(hours=1),
+        id="sync_google_insights_daily",
         max_instances=1,
         coalesce=True,
     )

@@ -42,6 +42,7 @@ async def _sync_one(http: httpx.AsyncClient, account_id: str, since: str, until:
     rl = RateLimiter(db_factory=AsyncSessionLocal, account_id=account_id)
     client = MetaClient(
         access_token=settings.meta_access_token,
+        app_secret=settings.meta_app_secret,
         http_client=http,
         rate_limiter=rl,
     )

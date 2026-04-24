@@ -64,6 +64,7 @@ SELECT
     r.plan_id,
     (r.amount = 1 AND r.plan_id ILIKE '%trial%')                 AS is_trial,
     (r.user_payment_rank = 1)                                    AS is_first_payment,
+    (r.order_id ILIKE '%md%')                                    AS is_mandate,
 
     -- Attribution flags
     (uad.is_reengagement = '1')                                  AS is_reattributed,
@@ -71,17 +72,27 @@ SELECT
     (uad.is_viewthrough = '1')                                   AS is_viewthrough,
 
     -- Device / geo
-    uad.platform,
+    -- user_devices.os is PRIMARY: Singular sets platform='Android' for all Facebook users
+    -- regardless of actual device; ud.os gives the true iOS/Android split.
+    -- Fall back to Singular uad.platform for users not in user_devices.
+    COALESCE(
+        CASE
+            WHEN LOWER(ud.os) LIKE 'ios%' OR LOWER(ud.os) = 'ipados' THEN 'iOS'
+            WHEN LOWER(ud.os) LIKE 'android%' THEN 'Android'
+        END,
+        uad.platform
+    )                                                            AS platform,
     uad.os_version,
     uad.device_brand,
     uad.device_model,
-    uad.priority,
+    u.priority,
 
     'user_transaction_history'                                   AS source_table
 
 FROM ranked r
 JOIN users u ON u.id = r.user_id
 LEFT JOIN user_additional_details uad ON uad.user_id = r.user_id
+LEFT JOIN user_devices             ud  ON ud.user_id  = r.user_id
 WHERE r.payment_date >= '{since}'
   AND r.payment_date <  '{until}'
 ORDER BY r.payment_date

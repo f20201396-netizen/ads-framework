@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meta Ads Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif; }
+    .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; }
+    .badge-active   { background:#14532d;color:#86efac }
+    .badge-paused   { background:#422006;color:#fdba74 }
+    .badge-deleted,.badge-archived { background:#1f2937;color:#9ca3af }
+    .badge-default  { background:#1e293b;color:#94a3b8 }
+    .badge-with_issues { background:#4c1d1d;color:#fca5a5 }
+    thead th { background:#12151f; position:sticky; top:0; z-index:1 }
+    tr:hover td { background:#1f2335 }
+    ::-webkit-scrollbar { width:6px;height:6px }
+    ::-webkit-scrollbar-track { background:#12151f }
+    ::-webkit-scrollbar-thumb { background:#2d3148;border-radius:3px }
+    .tab { padding:10px 16px; font-size:13px; font-weight:500; border-bottom:2px solid transparent; color:#64748b; cursor:pointer; white-space:nowrap; transition:all .15s }
+    .tab.active { border-bottom-color:#6366f1; color:#a5b4fc }
+    .tab:hover:not(.active) { color:#94a3b8 }
+    .rec-card { border-left:3px solid; }
+    .rec-warn { border-color:#f59e0b; background:#1c1810 }
+    .rec-danger { border-color:#ef4444; background:#1c1010 }
+    .rec-good { border-color:#22c55e; background:#101c12 }
+    .rec-info { border-color:#6366f1; background:#11101c }
+    .skeleton { animation:pulse 1.5s infinite; background:#2d3148; border-radius:4px }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    select { background:#1a1d27; border:1px solid #2d3148; color:#e2e8f0; border-radius:6px; padding:4px 8px; font-size:12px }
+    select:focus { outline:none; border-color:#6366f1 }
+    input[type=date],input[type=text] { background:#1a1d27; border:1px solid #2d3148; color:#e2e8f0; border-radius:6px; padding:4px 8px; font-size:12px }
+    input[type=date]:focus,input[type=text]:focus { outline:none; border-color:#6366f1 }
+    .empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:48px; color:#475569; gap:8px }
+    .empty-state svg { opacity:.3 }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<!-- ── Header ── -->
+<header class="border-b border-[#2d3148] px-6 py-3 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-xs font-bold">M</div>
+    <span class="text-sm font-semibold tracking-tight">Meta Ads</span>
+  </div>
+  <div class="flex items-center gap-3 text-xs text-slate-500">
+    <span id="sync-label"></span>
+    <div id="health-dot" class="w-2 h-2 rounded-full bg-gray-600"></div>
+    <span id="health-label">connecting…</span>
+  </div>
+</header>
+
+<!-- ── Tabs ── -->
+<div class="border-b border-[#2d3148] px-6 flex gap-1">
+  <button class="tab active" onclick="switchTab('overview')">Overview</button>
+  <button class="tab" onclick="switchTab('insights')">Insights</button>
+  <button class="tab" onclick="switchTab('recommendations')">Recommendations</button>
+</div>
+
+<!-- ── Toolbar ── -->
+<div class="px-6 py-2.5 border-b border-[#2d3148] flex items-center gap-2 flex-wrap bg-[#0f1117]">
+  <div class="flex gap-1">
+    <button onclick="setPreset(7)"  class="preset px-2.5 py-1 text-xs rounded bg-[#2d3148] hover:bg-indigo-700 transition-colors">7d</button>
+    <button onclick="setPreset(14)" class="preset px-2.5 py-1 text-xs rounded bg-[#2d3148] hover:bg-indigo-700 transition-colors">14d</button>
+    <button onclick="setPreset(30)" class="preset px-2.5 py-1 text-xs rounded bg-indigo-700 transition-colors">30d</button>
+    <button onclick="setPreset(90)" class="preset px-2.5 py-1 text-xs rounded bg-[#2d3148] hover:bg-indigo-700 transition-colors">90d</button>
+  </div>
+  <input type="date" id="since" class="text-xs" />
+  <span class="text-slate-600">→</span>
+  <input type="date" id="until" class="text-xs" />
+  <button onclick="loadAll()" class="px-3 py-1 text-xs rounded bg-indigo-600 hover:bg-indigo-500 font-medium">Apply</button>
+  <div class="ml-auto">
+    <input id="search" type="text" placeholder="Search campaigns…" oninput="filterCampaigns()" class="text-xs w-48" />
+  </div>
+</div>
+
+<!-- ══ OVERVIEW TAB ══════════════════════════════════════════════════════════ -->
+<div id="tab-overview" class="tab-pane px-6 py-4">
+  <!-- Summary cards -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" id="summary-cards">
+    <div class="card p-4 skeleton h-20"></div><div class="card p-4 skeleton h-20"></div>
+    <div class="card p-4 skeleton h-20"></div><div class="card p-4 skeleton h-20"></div>
+  </div>
+
+  <!-- Platform ROAS (Android vs iOS) -->
+  <div class="card mb-4 overflow-hidden">
+    <div class="px-4 py-3 border-b border-[#2d3148] flex items-center justify-between">
+      <div>
+        <h2 class="text-sm font-semibold">M0 ROAS by Platform</h2>
+        <p class="text-[10px] text-slate-500 mt-0.5">Revenue within first 30 days ÷ allocated spend &middot; spend allocated proportionally by attributed signups</p>
+      </div>
+      <span id="platform-roas-updated" class="text-[10px] text-slate-600"></span>
+    </div>
+    <div id="platform-roas-body" class="px-4 py-3">
+      <div class="flex gap-8 flex-wrap">
+        <div class="skeleton h-16 w-40 rounded"></div>
+        <div class="skeleton h-16 w-40 rounded"></div>
+      </div>
+    </div>
+  </div>
+  <!-- Main grid -->
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <!-- Campaign table -->
+    <div class="xl:col-span-2 card overflow-hidden">
+      <div class="px-4 py-3 border-b border-[#2d3148] flex items-center justify-between">
+        <h2 class="text-sm font-semibold">Campaigns</h2>
+        <span id="campaign-count" class="text-xs text-slate-500"></span>
+      </div>
+      <div class="overflow-auto max-h-[560px]">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="text-left text-slate-500 text-[10px] uppercase tracking-wide">
+              <th class="px-4 py-2">Campaign</th>
+              <th class="px-4 py-2">Status</th>
+              <th class="px-4 py-2">Objective</th>
+              <th class="px-4 py-2 text-right">Signups</th>
+              <th class="px-4 py-2 text-right">D6 Conv%</th>
+              <th class="px-4 py-2 text-right">Spend ₹</th>
+              <th class="px-4 py-2 text-right">CAC ₹</th>
+              <th class="px-4 py-2 text-right">ROAS</th>
+            </tr>
+          </thead>
+          <tbody id="campaigns-body">
+            <tr><td colspan="8" class="px-4 py-8 text-center text-slate-600">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <!-- Right column -->
+    <div class="flex flex-col gap-4">
+      <div class="card p-4">
+        <h2 class="text-sm font-semibold mb-3">Daily Spend</h2>
+        <canvas id="spend-chart" height="120"></canvas>
+        <p id="spend-empty" class="hidden text-center text-xs text-slate-600 py-4">No spend data yet — awaiting insights sync</p>
+      </div>
+      <div class="card overflow-hidden">
+        <div class="px-4 py-3 border-b border-[#2d3148]">
+          <h2 class="text-sm font-semibold">Top Adsets by Spend</h2>
+        </div>
+        <div class="overflow-auto max-h-64">
+          <table class="w-full text-xs">
+            <thead><tr class="text-left text-slate-500 text-[10px] uppercase tracking-wide">
+              <th class="px-4 py-2">Adset ID</th><th class="px-4 py-2 text-right">Spend ₹</th>
+            </tr></thead>
+            <tbody id="adsets-body"><tr><td colspan="2" class="px-4 py-4 text-center text-slate-600">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ INSIGHTS TAB ══════════════════════════════════════════════════════════ -->
+<div id="tab-insights" class="tab-pane hidden px-6 py-4">
+  <div class="flex items-center gap-3 mb-4 flex-wrap">
+    <label class="text-xs text-slate-500">Campaign</label>
+    <select id="insights-campaign" onchange="loadInsights()" class="w-72 truncate"></select>
+    <label class="text-xs text-slate-500 ml-4">Metric</label>
+    <select id="insights-metric" onchange="loadInsights()">
+      <option value="spend">Spend</option>
+      <option value="impressions">Impressions</option>
+      <option value="clicks">Clicks</option>
+      <option value="ctr">CTR</option>
+      <option value="cpm">CPM</option>
+      <option value="cpc">CPC</option>
+    </select>
+    <label class="text-xs text-slate-500 ml-4">Level</label>
+    <select id="insights-level" onchange="onLevelChange()">
+      <option value="campaign">Campaign</option>
+      <option value="adset">Adset</option>
+      <option value="ad">Ad</option>
+      <option value="account">Account</option>
+    </select>
+    <span id="ad-selector-wrap" class="hidden flex items-center gap-2">
+      <label class="text-xs text-slate-500 ml-4">Ad</label>
+      <select id="insights-ad" onchange="loadInsights()" class="w-72 truncate"></select>
+    </span>
+  </div>
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <!-- Main timeseries chart -->
+    <div class="xl:col-span-2 card p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold" id="insights-chart-title">Timeseries</h2>
+        <span class="text-xs text-slate-500" id="insights-range-label"></span>
+      </div>
+      <canvas id="insights-chart" height="200"></canvas>
+      <div id="insights-empty" class="hidden empty-state">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18M7 16l4-4 4 4 4-6"/></svg>
+        <p class="text-sm">No insights data yet</p>
+        <p class="text-xs">Awaiting first insights sync (runs hourly)</p>
+      </div>
+    </div>
+    <!-- Stat cards -->
+    <div class="flex flex-col gap-3">
+      <div class="card p-4">
+        <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Period Totals</p>
+        <div class="space-y-2.5" id="insights-totals">
+          <div class="skeleton h-4 rounded"></div><div class="skeleton h-4 rounded w-3/4"></div>
+          <div class="skeleton h-4 rounded w-1/2"></div>
+        </div>
+      </div>
+      <div class="card p-4">
+        <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Attribution (same range)</p>
+        <div class="space-y-2.5" id="insights-conv">
+          <div class="skeleton h-4 rounded"></div><div class="skeleton h-4 rounded w-3/4"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Breakdown section -->
+  <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold">Breakdown</h2>
+        <select id="breakdown-type" onchange="loadBreakdown()">
+          <option value="age,gender">Age × Gender</option>
+          <option value="country">Country</option>
+          <option value="publisher_platform">Platform</option>
+          <option value="impression_device">Device</option>
+          <option value="gender">Gender</option>
+          <option value="age">Age</option>
+        </select>
+      </div>
+      <div id="breakdown-chart-wrap"><canvas id="breakdown-chart" height="220"></canvas></div>
+      <div id="breakdown-empty" class="hidden empty-state">
+        <p class="text-sm">No breakdown data yet</p>
+      </div>
+    </div>
+    <div class="card overflow-hidden">
+      <div class="px-4 py-3 border-b border-[#2d3148]">
+        <h2 class="text-sm font-semibold">Breakdown Table</h2>
+      </div>
+      <div class="overflow-auto max-h-72">
+        <table class="w-full text-xs">
+          <thead><tr class="text-left text-slate-500 text-[10px] uppercase tracking-wide">
+            <th class="px-4 py-2">Segment</th>
+            <th class="px-4 py-2 text-right">Spend ₹</th>
+            <th class="px-4 py-2 text-right">Clicks</th>
+            <th class="px-4 py-2 text-right">CTR</th>
+          </tr></thead>
+          <tbody id="breakdown-body">
+            <tr><td colspan="4" class="px-4 py-4 text-center text-slate-600">Select a campaign</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ RECOMMENDATIONS TAB ══════════════════════════════════════════════════ -->
+<div id="tab-recommendations" class="tab-pane hidden px-6 py-4">
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h2 class="text-sm font-semibold">Recommendations</h2>
+      <p class="text-xs text-slate-500 mt-0.5">Rule-based signals from your campaign structure and attribution data</p>
+    </div>
+    <span id="rec-count" class="text-xs text-slate-500"></span>
+  </div>
+  <div id="rec-filters" class="flex gap-2 mb-4 flex-wrap">
+    <button onclick="filterRecs('all')" class="rec-filter-btn active px-3 py-1 text-xs rounded bg-indigo-700">All</button>
+    <button onclick="filterRecs('danger')" class="rec-filter-btn px-3 py-1 text-xs rounded bg-[#2d3148]">Critical</button>
+    <button onclick="filterRecs('warn')" class="rec-filter-btn px-3 py-1 text-xs rounded bg-[#2d3148]">Warning</button>
+    <button onclick="filterRecs('good')" class="rec-filter-btn px-3 py-1 text-xs rounded bg-[#2d3148]">Positive</button>
+    <button onclick="filterRecs('info')" class="rec-filter-btn px-3 py-1 text-xs rounded bg-[#2d3148]">Info</button>
+  </div>
+  <div id="recs-list" class="space-y-2">
+    <div class="skeleton h-16 rounded-xl"></div><div class="skeleton h-16 rounded-xl"></div><div class="skeleton h-16 rounded-xl"></div>
+  </div>
+</div>
+
+<!-- ── Campaign detail drawer ── -->
+<div id="drawer" class="fixed inset-y-0 right-0 w-96 bg-[#1a1d27] border-l border-[#2d3148] transform translate-x-full transition-transform duration-300 z-50 overflow-y-auto">
+  <div class="flex items-center justify-between px-5 py-4 border-b border-[#2d3148]">
+    <h3 class="text-sm font-semibold" id="drawer-title">Campaign</h3>
+    <button onclick="closeDrawer()" class="text-slate-500 hover:text-white text-xl leading-none">×</button>
+  </div>
+  <div id="drawer-content" class="px-5 py-4 space-y-5"></div>
+</div>
+<div id="drawer-backdrop" onclick="closeDrawer()" class="hidden fixed inset-0 bg-black/40 z-40"></div>
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+const API = 'http://localhost:8000';
+let spendChart = null, insightsChart = null, breakdownChart = null;
+let allCampaigns = [], convData = {}, acctId = null;
+let allRecs = [], activeRecFilter = 'all';
+
+// ── Tab routing ──────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  document.querySelectorAll('.tab').forEach(t => {
+    if (t.textContent.toLowerCase().startsWith(name)) t.classList.add('active');
+  });
+  if (name === 'insights' && allCampaigns.length) loadInsights();
+  if (name === 'recommendations' && allCampaigns.length) buildRecommendations();
+}
+
+// ── Dates ────────────────────────────────────────────────────────────────────
+const today = () => new Date().toISOString().slice(0,10);
+const daysAgo = n => { const d = new Date(); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); };
+function setPreset(n) {
+  document.getElementById('since').value = daysAgo(n);
+  document.getElementById('until').value = today();
+  document.querySelectorAll('.preset').forEach(b => {
+    b.classList.toggle('bg-indigo-700', b.textContent === n+'d');
+    b.classList.toggle('bg-[#2d3148]', b.textContent !== n+'d');
+  });
+  loadAll();
+}
+
+// ── Fetch ────────────────────────────────────────────────────────────────────
+async function api(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return r.json();
+}
+
+// ── Health ───────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    await api('/health');
+    document.getElementById('health-dot').className = 'w-2 h-2 rounded-full bg-green-500';
+    document.getElementById('health-label').textContent = 'Live';
+  } catch {
+    document.getElementById('health-dot').className = 'w-2 h-2 rounded-full bg-red-500';
+    document.getElementById('health-label').textContent = 'API offline';
+  }
+}
+
+// ── Format ───────────────────────────────────────────────────────────────────
+const fmt = {
+  inr:  v => v == null ? '—' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits:0}),
+  num:  v => v == null ? '—' : Number(v).toLocaleString('en-IN'),
+  pct:  v => v == null ? '—' : Number(v).toFixed(1) + '%',
+  roas: v => v == null ? '—' : Number(v).toFixed(2) + 'x',
+  k:    v => v == null ? '—' : Number(v) >= 1000 ? (Number(v)/1000).toFixed(1)+'k' : Number(v).toFixed(0),
+};
+function badge(status) {
+  const s = (status||'').toLowerCase();
+  const c = {active:'badge-active',paused:'badge-paused',deleted:'badge-deleted',archived:'badge-archived',with_issues:'badge-with_issues'}[s]||'badge-default';
+  return `<span class="px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${c}">${s.replace('_',' ')}</span>`;
+}
+function funnelBadge(name) {
+  const n = name.toUpperCase();
+  if (n.includes('_BOF_') || n.includes('BOF-')) return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-900 text-purple-300">BOF</span>`;
+  if (n.includes('_MOF_') || n.includes('MOF-')) return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-900 text-blue-300">MOF</span>`;
+  if (n.includes('_TOF_') || n.includes('TOF-')) return `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-900 text-teal-300">TOF</span>`;
+  return '';
+}
+
+// ── Summary cards ─────────────────────────────────────────────────────────────
+function renderCards(t) {
+  document.getElementById('summary-cards').innerHTML = [
+    { label:'Total Spend',  val: fmt.inr(t.spend) },
+    { label:'Signups',      val: fmt.num(t.signups) },
+    { label:'D6 Conv%',     val: fmt.pct(t.d6pct) },
+    { label:'Avg ROAS',     val: fmt.roas(t.roas) },
+  ].map(c => `<div class="card p-4">
+    <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">${c.label}</p>
+    <p class="text-2xl font-bold tracking-tight">${c.val}</p>
+  </div>`).join('');
+}
+
+// ── Load all ──────────────────────────────────────────────────────────────────
+async function loadAll() {
+  const since = document.getElementById('since').value;
+  const until = document.getElementById('until').value;
+
+  // Campaigns
+  const camData = await api('/structure/campaigns?limit=500');
+  allCampaigns = camData.data || [];
+  document.getElementById('campaign-count').textContent = allCampaigns.length + ' total';
+
+  // Populate insights campaign select
+  const sel = document.getElementById('insights-campaign');
+  sel.innerHTML = allCampaigns.map(c =>
+    `<option value="${c.id}">${c.name.slice(0,60)}</option>`
+  ).join('');
+
+  // Conversion summaries (first 40 campaigns)
+  const convResults = await Promise.allSettled(
+    allCampaigns.slice(0,40).map(c =>
+      api(`/conversions/summary?level=campaign&object_id=${c.id}&since=${since}&until=${until}`)
+        .then(d => ({ id: c.id, ...d }))
+    )
+  );
+  convData = {};
+  let totSpend=0, totSignups=0, totD6=0, totRev=0;
+  convResults.forEach(r => {
+    if (r.status === 'fulfilled') {
+      convData[r.value.id] = r.value;
+      totSpend   += Number(r.value.spend||0);
+      totSignups += Number(r.value.signups||0);
+      totD6      += Number(r.value.d6_conversions||0);
+      totRev     += Number(r.value.total_revenue_inr||0);
+    }
+  });
+  const d6pct = totSignups ? totD6*100/totSignups : null;
+  const roas  = totSpend   ? totRev/totSpend : null;
+  renderCards({ spend:totSpend, signups:totSignups, d6pct, roas });
+  renderCampaignTable(allCampaigns);
+
+  // Platform ROAS
+  loadPlatformRoas(since, until);
+
+  // Account-level data
+  const acctData = await api('/structure/accounts?limit=1').catch(()=>({data:[]}));
+  acctId = acctData.data?.[0]?.id;
+  if (acctId) {
+    loadSpendChart(acctId, since, until);
+    loadTopAdsets(acctId, since, until);
+  }
+
+  // Auto-refresh recommendations if on that tab
+  if (document.getElementById('tab-recommendations').classList.contains('hidden') === false) {
+    buildRecommendations();
+  }
+
+  document.getElementById('sync-label').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── Campaign table ─────────────────────────────────────────────────────────────
+function renderCampaignTable(campaigns) {
+  const tbody = document.getElementById('campaigns-body');
+  if (!campaigns.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-slate-600">No campaigns found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = campaigns.map(c => {
+    const cv = convData[c.id] || {};
+    return `<tr class="border-t border-[#2d3148] cursor-pointer" onclick="openDrawer('${c.id}')">
+      <td class="px-4 py-2.5 max-w-[200px]">
+        <div class="flex items-center gap-1.5">
+          ${funnelBadge(c.name)}
+          <p class="truncate font-medium text-slate-200 text-xs">${c.name}</p>
+        </div>
+        <p class="text-[10px] text-slate-600 font-mono mt-0.5">${c.id}</p>
+      </td>
+      <td class="px-4 py-2.5">${badge(c.effective_status)}</td>
+      <td class="px-4 py-2.5 text-slate-400 text-xs">${(c.objective||'').replace(/_/g,' ').replace('OUTCOME ','')}</td>
+      <td class="px-4 py-2.5 text-right tabular-nums text-xs">${fmt.num(cv.signups)}</td>
+      <td class="px-4 py-2.5 text-right tabular-nums text-xs">${fmt.pct(cv.d6_conversion_pct)}</td>
+      <td class="px-4 py-2.5 text-right tabular-nums text-xs">${fmt.inr(cv.spend)}</td>
+      <td class="px-4 py-2.5 text-right tabular-nums text-xs">${fmt.inr(cv.cac_inr)}</td>
+      <td class="px-4 py-2.5 text-right tabular-nums text-xs">${fmt.roas(cv.attributed_roas)}</td>
+    </tr>`;
+  }).join('');
+}
+function filterCampaigns() {
+  const q = document.getElementById('search').value.toLowerCase();
+  const filtered = q ? allCampaigns.filter(c => c.name.toLowerCase().includes(q)) : allCampaigns;
+  document.getElementById('campaign-count').textContent = filtered.length + (q ? ' matching' : ' total');
+  renderCampaignTable(filtered);
+}
+
+// ── Platform ROAS (Android vs iOS) ────────────────────────────────────────────
+async function loadPlatformRoas(since, until) {
+  const el = document.getElementById('platform-roas-body');
+  try {
+    const res = await api(`/conversions/platform-roas?since=${since}&until=${until}`);
+    const rows = res.data || [];
+
+    if (!rows.length) {
+      el.innerHTML = '<p class="text-xs text-slate-600">No attribution data for this range</p>';
+      return;
+    }
+
+    const platformColors = {
+      'Android': { dot: 'bg-green-500',  label: 'text-green-400'  },
+      'iOS':     { dot: 'bg-blue-500',   label: 'text-blue-400'   },
+    };
+
+    el.innerHTML = `
+      <div class="flex gap-6 flex-wrap mb-4">
+        ${rows.map(r => {
+          const c = platformColors[r.platform] || { dot: 'bg-slate-500', label: 'text-slate-400' };
+          const hasSpend = r.allocated_spend != null && Number(r.allocated_spend) > 0;
+          return `
+            <div class="bg-[#12151f] rounded-xl p-4 min-w-[200px] flex-1">
+              <div class="flex items-center gap-2 mb-3">
+                <span class="w-2 h-2 rounded-full ${c.dot}"></span>
+                <span class="text-xs font-semibold ${c.label}">${r.platform}</span>
+              </div>
+              <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                <div><p class="text-[10px] text-slate-500">Signups</p><p class="font-semibold">${fmt.num(r.signups)}</p></div>
+                <div><p class="text-[10px] text-slate-500">M0 Conv%</p><p class="font-semibold">${fmt.pct(r.m0_conversion_pct)}</p></div>
+                <div><p class="text-[10px] text-slate-500">M0 Revenue</p><p class="font-semibold">${fmt.inr(r.m0_revenue_inr)}</p></div>
+                <div><p class="text-[10px] text-slate-500">Alloc. Spend</p><p class="font-semibold">${hasSpend ? fmt.inr(r.allocated_spend) : '—'}</p></div>
+                <div class="col-span-2 pt-1 border-t border-[#2d3148]">
+                  <p class="text-[10px] text-slate-500 mb-0.5">M0 ROAS</p>
+                  <p class="text-xl font-bold ${r.m0_roas >= 1 ? 'text-green-400' : r.m0_roas > 0 ? 'text-amber-400' : 'text-slate-400'}">${hasSpend ? fmt.roas(r.m0_roas) : '—'}</p>
+                </div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+      <div class="overflow-auto">
+        <table class="w-full text-xs">
+          <thead><tr class="text-left text-slate-500 text-[10px] uppercase tracking-wide border-b border-[#2d3148]">
+            <th class="pb-2">Platform</th>
+            <th class="pb-2 text-right">Signups</th>
+            <th class="pb-2 text-right">D0 Conv%</th>
+            <th class="pb-2 text-right">D6 Conv%</th>
+            <th class="pb-2 text-right">M0 Conv%</th>
+            <th class="pb-2 text-right">M0 Revenue</th>
+            <th class="pb-2 text-right">Alloc. Spend</th>
+            <th class="pb-2 text-right">M0 ROAS</th>
+            <th class="pb-2 text-right">Total ROAS</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map(r => {
+              const hasSpend = r.allocated_spend != null && Number(r.allocated_spend) > 0;
+              const totalSignups = rows.reduce((s,x)=>s+Number(x.signups||0),0);
+              const sharePct = totalSignups ? (Number(r.signups)/totalSignups*100).toFixed(1)+'%' : '—';
+              return `<tr class="border-t border-[#2d3148]">
+                <td class="py-2 font-medium">${r.platform} <span class="text-[10px] text-slate-600">${sharePct}</span></td>
+                <td class="py-2 text-right tabular-nums">${fmt.num(r.signups)}</td>
+                <td class="py-2 text-right tabular-nums">${fmt.pct(r.d0_conversions && r.signups ? r.d0_conversions*100/r.signups : null)}</td>
+                <td class="py-2 text-right tabular-nums">${fmt.pct(r.d6_conversions && r.signups ? r.d6_conversions*100/r.signups : null)}</td>
+                <td class="py-2 text-right tabular-nums">${fmt.pct(r.m0_conversion_pct)}</td>
+                <td class="py-2 text-right tabular-nums">${fmt.inr(r.m0_revenue_inr)}</td>
+                <td class="py-2 text-right tabular-nums">${hasSpend ? fmt.inr(r.allocated_spend) : '—'}</td>
+                <td class="py-2 text-right tabular-nums font-semibold ${r.m0_roas >= 1 ? 'text-green-400' : r.m0_roas > 0 ? 'text-amber-400' : ''}">${hasSpend ? fmt.roas(r.m0_roas) : '—'}</td>
+                <td class="py-2 text-right tabular-nums">${hasSpend ? fmt.roas(r.total_roas) : '—'}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    document.getElementById('platform-roas-updated').textContent = 'M0 = days 0–30';
+  } catch(e) {
+    el.innerHTML = '<p class="text-xs text-slate-600">Failed to load platform ROAS</p>';
+  }
+}
+
+// ── Spend chart ───────────────────────────────────────────────────────────────
+async function loadSpendChart(accountId, since, until) {
+  try {
+    const ts = await api(`/insights/timeseries?level=account&object_id=${accountId}&since=${since}&until=${until}&metrics=spend&limit=90`);
+    const data = ts.data || [];
+    document.getElementById('spend-chart').classList.toggle('hidden', !data.length);
+    document.getElementById('spend-empty').classList.toggle('hidden', !!data.length);
+    if (!data.length) return;
+    if (spendChart) spendChart.destroy();
+    const ctx = document.getElementById('spend-chart').getContext('2d');
+    spendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.map(d => d.date),
+        datasets: [{ data: data.map(d => Number(d.spend||0)), borderColor:'#6366f1', backgroundColor:'rgba(99,102,241,.08)', borderWidth:2, pointRadius:0, fill:true, tension:.4 }]
+      },
+      options: { responsive:true, plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => fmt.inr(c.raw) }}},
+        scales: {
+          x: { ticks:{color:'#475569',maxTicksLimit:6,font:{size:10}}, grid:{color:'#1f2335'} },
+          y: { ticks:{color:'#475569',font:{size:10},callback:v=>'₹'+fmt.k(v)}, grid:{color:'#1f2335'} }
+        }
+      }
+    });
+  } catch(e) {
+    document.getElementById('spend-chart').classList.add('hidden');
+    document.getElementById('spend-empty').classList.remove('hidden');
+  }
+}
+
+async function loadTopAdsets(accountId, since, until) {
+  try {
+    const top = await api(`/insights/top?level=adset&parent_id=${accountId}&metric=spend&since=${since}&until=${until}&limit=15`);
+    const data = top.data || [];
+    document.getElementById('adsets-body').innerHTML = data.length
+      ? data.map(r => `<tr class="border-t border-[#2d3148]">
+          <td class="px-4 py-2 font-mono text-[10px] text-slate-400">${r.adset_id}</td>
+          <td class="px-4 py-2 text-right text-xs tabular-nums">${fmt.inr(r.spend)}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="2" class="px-4 py-4 text-center text-slate-600 text-xs">No spend data yet</td></tr>';
+  } catch {
+    document.getElementById('adsets-body').innerHTML = '<tr><td colspan="2" class="px-4 py-4 text-center text-slate-600 text-xs">No data</td></tr>';
+  }
+}
+
+// ── Insights tab ───────────────────────────────────────────────────────────────
+async function onLevelChange() {
+  const level = document.getElementById('insights-level').value;
+  const adWrap = document.getElementById('ad-selector-wrap');
+  if (level === 'ad') {
+    adWrap.classList.remove('hidden');
+    await loadAdOptions();
+  } else {
+    adWrap.classList.add('hidden');
+  }
+  loadInsights();
+}
+
+async function loadAdOptions() {
+  const campaignId = document.getElementById('insights-campaign').value;
+  if (!campaignId) return;
+  const sel = document.getElementById('insights-ad');
+  sel.innerHTML = '<option value="">Loading ads…</option>';
+  try {
+    // Get ads that belong to adsets of this campaign
+    const r = await api(`/structure/ads?campaign_id=${campaignId}&limit=200`);
+    const ads = r.data || [];
+    if (!ads.length) { sel.innerHTML = '<option value="">No ads found</option>'; return; }
+    sel.innerHTML = ads.map(a =>
+      `<option value="${a.id}">${a.name ? a.name.substring(0,60) : a.id} (${a.effective_status || ''})</option>`
+    ).join('');
+  } catch {
+    sel.innerHTML = '<option value="">Error loading ads</option>';
+  }
+}
+
+async function loadInsights() {
+  const since = document.getElementById('since').value;
+  const until = document.getElementById('until').value;
+  const campaignId = document.getElementById('insights-campaign').value;
+  const metric = document.getElementById('insights-metric').value;
+  const level = document.getElementById('insights-level').value;
+  if (!campaignId) return;
+
+  let objectId;
+  if (level === 'account') objectId = acctId || campaignId;
+  else if (level === 'ad') objectId = document.getElementById('insights-ad').value;
+  else objectId = campaignId;
+  if (!objectId) return;
+  document.getElementById('insights-range-label').textContent = `${since} → ${until}`;
+
+  const metricLabel = document.getElementById('insights-metric').selectedOptions[0].textContent;
+  document.getElementById('insights-chart-title').textContent = `${metricLabel} — ${level} level`;
+
+  // Timeseries
+  try {
+    const ts = await api(`/insights/timeseries?level=${level}&object_id=${objectId}&since=${since}&until=${until}&metrics=${metric}&limit=90`);
+    const data = ts.data || [];
+    document.getElementById('insights-chart').classList.toggle('hidden', !data.length);
+    document.getElementById('insights-empty').classList.toggle('hidden', !!data.length);
+
+    if (data.length) {
+      const isCurrency = ['spend','cpm','cpc'].includes(metric);
+      if (insightsChart) insightsChart.destroy();
+      const ctx = document.getElementById('insights-chart').getContext('2d');
+      insightsChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: data.map(d => d.date),
+          datasets: [{ data: data.map(d => Number(d[metric]||0)), backgroundColor:'rgba(99,102,241,.7)', borderRadius:3 }]
+        },
+        options: { responsive:true, plugins:{ legend:{display:false}, tooltip:{ callbacks:{
+          label: c => isCurrency ? fmt.inr(c.raw) : metric.includes('ctr') ? fmt.pct(c.raw) : fmt.num(c.raw)
+        }}},
+          scales: {
+            x: { ticks:{color:'#475569',maxTicksLimit:10,font:{size:10}}, grid:{color:'#1f2335'} },
+            y: { ticks:{color:'#475569',font:{size:10},callback: v => isCurrency ? '₹'+fmt.k(v) : fmt.k(v)}, grid:{color:'#1f2335'} }
+          }
+        }
+      });
+
+      // Period totals
+      const sum = data.reduce((a,d) => a+Number(d[metric]||0), 0);
+      const avg = sum / data.length;
+      const max = Math.max(...data.map(d=>Number(d[metric]||0)));
+      document.getElementById('insights-totals').innerHTML = [
+        ['Total', isCurrency ? fmt.inr(sum) : fmt.num(sum)],
+        ['Daily avg', isCurrency ? fmt.inr(avg) : fmt.num(avg)],
+        ['Peak day', isCurrency ? fmt.inr(max) : fmt.num(max)],
+        ['Days w/ data', data.length],
+      ].map(([l,v]) => `<div class="flex justify-between text-xs"><span class="text-slate-500">${l}</span><span class="font-medium">${v}</span></div>`).join('');
+    }
+  } catch {
+    document.getElementById('insights-chart').classList.add('hidden');
+    document.getElementById('insights-empty').classList.remove('hidden');
+  }
+
+  // Attribution for same range
+  const cv = convData[campaignId] || {};
+  const hasConv = Object.keys(cv).length > 0;
+  document.getElementById('insights-conv').innerHTML = hasConv ? [
+    ['Signups', fmt.num(cv.signups)],
+    ['D0 Conv%', fmt.pct(cv.d0_conversion_pct)],
+    ['D6 Conv%', fmt.pct(cv.d6_conversion_pct)],
+    ['CAC ₹', fmt.inr(cv.cac_inr)],
+    ['ROAS', fmt.roas(cv.attributed_roas)],
+    ['Revenue ₹', fmt.inr(cv.total_revenue_inr)],
+  ].map(([l,v]) => `<div class="flex justify-between text-xs"><span class="text-slate-500">${l}</span><span class="font-medium">${v}</span></div>`).join('')
+  : '<p class="text-xs text-slate-600">No attribution data for this range</p>';
+
+  // Load breakdown
+  loadBreakdown();
+}
+
+async function loadBreakdown() {
+  const since = document.getElementById('since').value;
+  const until = document.getElementById('until').value;
+  const campaignId = document.getElementById('insights-campaign').value;
+  const btype = document.getElementById('breakdown-type').value;
+  if (!campaignId) return;
+
+  try {
+    const bd = await api(`/insights/breakdown?level=campaign&object_id=${campaignId}&breakdown=${btype}&since=${since}&until=${until}&metrics=spend,clicks,ctr&limit=200`);
+    const data = bd.data || [];
+    document.getElementById('breakdown-chart-wrap').classList.toggle('hidden', !data.length);
+    document.getElementById('breakdown-empty').classList.toggle('hidden', !!data.length);
+
+    if (!data.length) {
+      document.getElementById('breakdown-body').innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-slate-600 text-xs">No breakdown data yet</td></tr>';
+      return;
+    }
+
+    // Aggregate by breakdown_key
+    const agg = {};
+    data.forEach(r => {
+      const k = r.breakdown_key;
+      agg[k] = agg[k] || { spend:0, clicks:0 };
+      agg[k].spend  += Number(r.spend||0);
+      agg[k].clicks += Number(r.clicks||0);
+    });
+    const sorted = Object.entries(agg).sort((a,b) => b[1].spend - a[1].spend).slice(0,12);
+
+    // Chart
+    if (breakdownChart) breakdownChart.destroy();
+    const ctx = document.getElementById('breakdown-chart').getContext('2d');
+    breakdownChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: sorted.map(([k]) => k),
+        datasets: [{ label:'Spend', data: sorted.map(([,v]) => v.spend), backgroundColor:'rgba(99,102,241,.7)', borderRadius:2 }]
+      },
+      options: { indexAxis:'y', responsive:true, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmt.inr(c.raw)}}},
+        scales: {
+          x: { ticks:{color:'#475569',font:{size:10},callback:v=>'₹'+fmt.k(v)}, grid:{color:'#1f2335'} },
+          y: { ticks:{color:'#475569',font:{size:10}}, grid:{display:false} }
+        }
+      }
+    });
+
+    // Table
+    document.getElementById('breakdown-body').innerHTML = sorted.map(([k,v]) => {
+      const totalSpend = sorted.reduce((a,[,vv])=>a+vv.spend,0);
+      const pct = totalSpend ? (v.spend/totalSpend*100).toFixed(1)+'%' : '—';
+      return `<tr class="border-t border-[#2d3148]">
+        <td class="px-4 py-2 text-xs">${k} <span class="text-slate-600 text-[10px]">${pct}</span></td>
+        <td class="px-4 py-2 text-right text-xs tabular-nums">${fmt.inr(v.spend)}</td>
+        <td class="px-4 py-2 text-right text-xs tabular-nums">${fmt.num(v.clicks)}</td>
+        <td class="px-4 py-2 text-right text-xs tabular-nums">—</td>
+      </tr>`;
+    }).join('');
+  } catch {
+    document.getElementById('breakdown-empty').classList.remove('hidden');
+    document.getElementById('breakdown-chart-wrap').classList.add('hidden');
+    document.getElementById('breakdown-body').innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-slate-600 text-xs">No data yet</td></tr>';
+  }
+}
+
+// ── Recommendations ────────────────────────────────────────────────────────────
+function buildRecommendations() {
+  allRecs = [];
+  const since = document.getElementById('since').value;
+  const until = document.getElementById('until').value;
+  const now = new Date();
+
+  allCampaigns.forEach(c => {
+    const cv = convData[c.id] || {};
+    const isActive = c.effective_status === 'ACTIVE';
+    const isPaused = c.effective_status === 'PAUSED';
+    const hasBudget = !!(c.daily_budget || c.lifetime_budget);
+    const budget = ((Number(c.daily_budget||0) + Number(c.lifetime_budget||0)) / 100);
+    const remaining = Number(c.budget_remaining||0) / 100;
+    const updatedAt = c.updated_time ? new Date(c.updated_time) : null;
+    const staleDays = updatedAt ? Math.floor((now - updatedAt) / 86400000) : null;
+    const createdAt = c.created_time ? new Date(c.created_time) : null;
+    const ageDays = createdAt ? Math.floor((now - createdAt) / 86400000) : null;
+    const spend = Number(cv.spend||0);
+    const roas = cv.attributed_roas ? Number(cv.attributed_roas) : null;
+    const cac = cv.cac_inr ? Number(cv.cac_inr) : null;
+    const d6pct = cv.d6_conversion_pct ? Number(cv.d6_conversion_pct) : null;
+
+    // ── Critical ──────────────────────────────────
+    if (c.effective_status === 'WITH_ISSUES') {
+      allRecs.push({ type:'danger', title:'Campaign with active issues', body:`<strong>${c.name}</strong> is flagged by Meta. Check Meta Ads Manager for issue details.`, campaign: c.name });
+    }
+    if (isActive && !hasBudget) {
+      allRecs.push({ type:'danger', title:'Active campaign with no budget set', body:`<strong>${c.name}</strong> is ACTIVE but has no daily or lifetime budget configured.`, campaign: c.name });
+    }
+    if (isActive && roas !== null && roas < 0.5 && spend > 10000) {
+      allRecs.push({ type:'danger', title:'Very low ROAS — consider pausing', body:`<strong>${c.name}</strong> has ROAS ${fmt.roas(roas)} on ${fmt.inr(spend)} spend. Revenue barely covering cost.`, campaign: c.name });
+    }
+
+    // ── Warnings ──────────────────────────────────
+    if (isActive && staleDays !== null && staleDays > 21) {
+      allRecs.push({ type:'warn', title:'Stale active campaign (no changes in 21+ days)', body:`<strong>${c.name}</strong> hasn't been modified in ${staleDays} days. Review if still intentional.`, campaign: c.name });
+    }
+    if (isPaused && remaining > 5000) {
+      allRecs.push({ type:'warn', title:'Paused campaign with unspent budget', body:`<strong>${c.name}</strong> is paused but has ${fmt.inr(remaining)} remaining budget.`, campaign: c.name });
+    }
+    if (isActive && spend > 0 && d6pct !== null && d6pct < 1) {
+      allRecs.push({ type:'warn', title:'Low D6 conversion rate', body:`<strong>${c.name}</strong> converting at ${fmt.pct(d6pct)} D6. Fleet median is typically 2–5%.`, campaign: c.name });
+    }
+    if (isActive && roas !== null && roas > 0 && roas < 1 && spend > 5000) {
+      allRecs.push({ type:'warn', title:'ROAS below 1x — spending more than earning', body:`<strong>${c.name}</strong> ROAS ${fmt.roas(roas)}. Attribution may be lagging, but worth watching.`, campaign: c.name });
+    }
+    if (isActive && c.bid_strategy === null && hasBudget) {
+      allRecs.push({ type:'warn', title:'No bid strategy set', body:`<strong>${c.name}</strong> has no bid strategy configured — Meta will use Lowest Cost by default.`, campaign: c.name });
+    }
+
+    // ── Positive ──────────────────────────────────
+    if (roas !== null && roas >= 3 && spend > 20000) {
+      allRecs.push({ type:'good', title:'Strong performer — consider scaling budget', body:`<strong>${c.name}</strong> has ROAS ${fmt.roas(roas)} on ${fmt.inr(spend)} spend. This campaign is returning well.`, campaign: c.name });
+    }
+    if (d6pct !== null && d6pct > 5 && spend > 10000) {
+      allRecs.push({ type:'good', title:'High D6 conversion rate', body:`<strong>${c.name}</strong> achieving ${fmt.pct(d6pct)} D6 conversion — above typical range. Good signal.`, campaign: c.name });
+    }
+
+    // ── Info ──────────────────────────────────────
+    if (isActive && ageDays !== null && ageDays <= 7) {
+      allRecs.push({ type:'info', title:'New campaign — likely in learning phase', body:`<strong>${c.name}</strong> created ${ageDays}d ago. Avoid editing budgets or targeting while Meta optimises delivery.`, campaign: c.name });
+    }
+    if (c.objective === 'OUTCOME_SALES' && !c.name.toUpperCase().includes('BOF')) {
+      allRecs.push({ type:'info', title:'OUTCOME_SALES without BOF label', body:`<strong>${c.name}</strong> uses Sales objective but name doesn't indicate Bottom-of-Funnel stage. Verify campaign intent.`, campaign: c.name });
+    }
+  });
+
+  // Global checks
+  const activeCnt = allCampaigns.filter(c => c.effective_status === 'ACTIVE').length;
+  const pausedCnt = allCampaigns.filter(c => c.effective_status === 'PAUSED').length;
+  if (activeCnt > 20) {
+    allRecs.push({ type:'info', title:`${activeCnt} active campaigns running simultaneously`, body:`Large active fleet can dilute budget and make analysis harder. Consider consolidating underperformers.`, campaign: null });
+  }
+  if (pausedCnt > activeCnt * 2) {
+    allRecs.push({ type:'info', title:`${pausedCnt} paused vs ${activeCnt} active campaigns`, body:`High paused:active ratio. Archive old campaigns to keep account clean and improve delivery signals.`, campaign: null });
+  }
+
+  // No insights data global flag
+  const hasInsights = Object.values(convData).some(v => v.spend > 0);
+  if (!hasInsights) {
+    allRecs.unshift({ type:'info', title:'Insights data not yet synced', body:'Conversion metrics (signups, ROAS, CAC) will populate after the first successful insights sync. Sync runs hourly.', campaign: null });
+  }
+
+  document.getElementById('rec-count').textContent = allRecs.length + ' signals';
+  renderRecs();
+}
+
+function filterRecs(type) {
+  activeRecFilter = type;
+  document.querySelectorAll('.rec-filter-btn').forEach(b => {
+    b.classList.toggle('bg-indigo-700', b.textContent.toLowerCase().startsWith(type) || (type==='all' && b.textContent==='All'));
+    b.classList.toggle('bg-[#2d3148]', !(b.textContent.toLowerCase().startsWith(type) || (type==='all' && b.textContent==='All')));
+  });
+  renderRecs();
+}
+
+function renderRecs() {
+  const filtered = activeRecFilter === 'all' ? allRecs : allRecs.filter(r => r.type === activeRecFilter);
+  const icons = { danger:'⚠', warn:'●', good:'↑', info:'ℹ' };
+  const labels = { danger:'Critical', warn:'Warning', good:'Opportunity', info:'Info' };
+  document.getElementById('recs-list').innerHTML = filtered.length ? filtered.map(r => `
+    <div class="card rec-card rec-${r.type} p-4 rounded-xl">
+      <div class="flex items-start gap-3">
+        <span class="text-base mt-0.5 ${r.type==='danger'?'text-red-400':r.type==='warn'?'text-amber-400':r.type==='good'?'text-green-400':'text-indigo-400'}">${icons[r.type]}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 mb-0.5">
+            <span class="text-[10px] uppercase tracking-wider font-semibold ${r.type==='danger'?'text-red-500':r.type==='warn'?'text-amber-500':r.type==='good'?'text-green-500':'text-indigo-400'}">${labels[r.type]}</span>
+          </div>
+          <p class="text-xs font-semibold text-slate-200">${r.title}</p>
+          <p class="text-xs text-slate-400 mt-0.5">${r.body}</p>
+        </div>
+      </div>
+    </div>
+  `).join('') : '<div class="empty-state"><p class="text-sm">No signals in this category</p></div>';
+}
+
+// ── Drawer ────────────────────────────────────────────────────────────────────
+function openDrawer(campaignId) {
+  const c = allCampaigns.find(x => x.id === campaignId) || {};
+  const cv = convData[campaignId] || {};
+  document.getElementById('drawer-title').textContent = c.name || 'Campaign';
+  document.getElementById('drawer-content').innerHTML = `
+    <div>
+      <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Identity</p>
+      <dl class="space-y-1.5">
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">ID</dt><dd class="font-mono text-slate-300">${c.id}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Status</dt><dd>${badge(c.effective_status)}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Objective</dt><dd class="text-slate-300">${(c.objective||'—').replace(/_/g,' ')}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Buying type</dt><dd class="text-slate-300">${c.buying_type||'—'}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Bid strategy</dt><dd class="text-slate-300">${c.bid_strategy||'Lowest cost (default)'}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Created</dt><dd class="text-slate-300">${c.created_time ? c.created_time.slice(0,10) : '—'}</dd></div>
+      </dl>
+    </div>
+    <div class="border-t border-[#2d3148] pt-4">
+      <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Budget</p>
+      <dl class="space-y-1.5">
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Daily budget</dt><dd>${fmt.inr(c.daily_budget ? c.daily_budget/100 : null)}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Lifetime budget</dt><dd>${fmt.inr(c.lifetime_budget ? c.lifetime_budget/100 : null)}</dd></div>
+        <div class="flex justify-between text-xs"><dt class="text-slate-500">Remaining</dt><dd>${fmt.inr(c.budget_remaining ? c.budget_remaining/100 : null)}</dd></div>
+      </dl>
+    </div>
+    <div class="border-t border-[#2d3148] pt-4">
+      <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Attribution — selected range</p>
+      <div class="grid grid-cols-2 gap-2">
+        ${['Signups','D0 Conv%','D6 Conv%','D0 Trial%','D6 Trial%','CAC ₹','ROAS','LTV ₹','Revenue ₹','Spend ₹'].map(l => {
+          const key = {
+            'Signups':'signups','D0 Conv%':'d0_conversion_pct','D6 Conv%':'d6_conversion_pct',
+            'D0 Trial%':'d0_trial_pct','D6 Trial%':'d6_trial_pct','CAC ₹':'cac_inr',
+            'ROAS':'attributed_roas','LTV ₹':'avg_ltv_inr','Revenue ₹':'total_revenue_inr','Spend ₹':'spend'
+          }[l];
+          const val = cv[key];
+          const formatted = l.includes('%') ? fmt.pct(val) : l.includes('₹') ? fmt.inr(val) : l==='ROAS' ? fmt.roas(val) : fmt.num(val);
+          return `<div class="bg-[#12151f] rounded-lg p-2.5"><p class="text-[10px] text-slate-500 mb-1">${l}</p><p class="text-sm font-semibold">${formatted}</p></div>`;
+        }).join('')}
+      </div>
+    </div>
+    <div class="border-t border-[#2d3148] pt-4">
+      <button onclick="document.getElementById('insights-campaign').value='${campaignId}'; closeDrawer(); switchTab('insights'); loadInsights()" class="w-full py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 font-medium">Open in Insights →</button>
+    </div>
+  `;
+  document.getElementById('drawer').classList.remove('translate-x-full');
+  document.getElementById('drawer-backdrop').classList.remove('hidden');
+}
+function closeDrawer() {
+  document.getElementById('drawer').classList.add('translate-x-full');
+  document.getElementById('drawer-backdrop').classList.add('hidden');
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+checkHealth();
+setInterval(checkHealth, 30000);
+document.getElementById('since').value = daysAgo(30);
+document.getElementById('until').value = today();
+loadAll();
+</script>
+</body>
+</html>

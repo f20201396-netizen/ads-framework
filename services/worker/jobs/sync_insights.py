@@ -41,6 +41,7 @@ async def _sync_one(http: httpx.AsyncClient, account_id: str, since: str, until:
     rl = RateLimiter(db_factory=AsyncSessionLocal, account_id=account_id)
     client = MetaClient(
         access_token=settings.meta_access_token,
+        app_secret=settings.meta_app_secret,
         http_client=http,
         rate_limiter=rl,
     )
@@ -53,7 +54,10 @@ async def _sync_one(http: httpx.AsyncClient, account_id: str, since: str, until:
             fields=INSIGHTS_AD_FIELDS,
             action_attribution_windows=[_WINDOW],
         ):
-            rows.append(parse_insight_ad(raw, _WINDOW))
+            parsed = parse_insight_ad(raw, _WINDOW)
+            if parsed.get("ad_id") is None:
+                continue
+            rows.append(parsed)
             run.rows_upserted += 1
 
         async with AsyncSessionLocal() as session:

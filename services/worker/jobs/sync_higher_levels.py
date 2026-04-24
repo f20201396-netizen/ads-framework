@@ -45,6 +45,7 @@ async def sync_insights_higher_levels() -> None:
             rl = RateLimiter(db_factory=AsyncSessionLocal, account_id=account_id)
             client = MetaClient(
                 access_token=settings.meta_access_token,
+                app_secret=settings.meta_app_secret,
                 http_client=http,
                 rate_limiter=rl,
             )

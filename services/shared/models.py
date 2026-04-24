@@ -625,6 +625,7 @@ class AttributionEvent(Base):
     plan_id: Mapped[str | None]          = mapped_column(String)
     is_trial: Mapped[bool]               = mapped_column(Boolean, nullable=False, server_default="false")
     is_first_payment: Mapped[bool]       = mapped_column(Boolean, nullable=False, server_default="false")
+    is_mandate: Mapped[bool]             = mapped_column(Boolean, nullable=False, server_default="false")
     is_reattributed: Mapped[bool]        = mapped_column(Boolean, nullable=False, server_default="false")
     is_organic: Mapped[bool]             = mapped_column(Boolean, nullable=False, server_default="false")
     is_viewthrough: Mapped[bool]         = mapped_column(Boolean, nullable=False, server_default="false")
@@ -673,3 +674,124 @@ class PixelEventStatsDaily(Base):
     event_name: Mapped[str] = mapped_column(String(255), nullable=False)
     count: Mapped[int | None] = mapped_column(BigInteger)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# GOOGLE ADS TABLES
+# =============================================================================
+
+class GoogleCampaign(Base):
+    __tablename__ = "google_campaigns"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    advertising_channel_type: Mapped[str | None] = mapped_column(Text)
+    bidding_strategy_type: Mapped[str | None] = mapped_column(Text)
+    daily_budget: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GoogleAdGroup(Base):
+    __tablename__ = "google_ad_groups"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    type: Mapped[str | None] = mapped_column(Text)
+    cpc_bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GoogleAd(Base):
+    __tablename__ = "google_ads"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    ad_group_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    campaign_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    type: Mapped[str | None] = mapped_column(Text)
+    final_urls: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# PROD MIRROR TABLES (Phase 7)
+# =============================================================================
+
+class UserDevice(Base):
+    """
+    Local mirror of prod user_devices — one row per user_id.
+    Used to resolve platform (iOS/Android) for Singular-attributed users
+    where platform IS NULL (common for iOS Facebook installs).
+    """
+    __tablename__ = "user_devices"
+
+    user_id:   Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    os:        Mapped[str | None]    = mapped_column(Text)
+    synced_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SingularCampaignMetric(Base):
+    """
+    Daily aggregate campaign cost from Singular MMP.
+    Used as the spend source for Platform ROAS calculations
+    (matches the reference Metabase report, ~13% lower than Meta insights_daily).
+
+    Key columns:
+      date          mirrors prod start_date
+      source        network ('Facebook', 'AdWords', …)
+      campaign_name mirrors prod adn_campaign_name
+      os            platform ('Android', 'iOS', 'Web', 'Mixed') — enables direct spend split
+      cost          mirrors prod adn_cost (INR)
+    """
+    __tablename__ = "singular_campaign_metrics"
+    __table_args__ = (
+        UniqueConstraint("date", "source", "campaign_name", "os",
+                         name="uq_singular_campaign_metrics"),
+    )
+
+    id:            Mapped[int]           = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    date:          Mapped[date]          = mapped_column(Date, nullable=False)
+    source:        Mapped[str]           = mapped_column(Text, nullable=False, server_default="")
+    campaign_name: Mapped[str]           = mapped_column(Text, nullable=False, server_default="")
+    os:            Mapped[str]           = mapped_column(Text, nullable=False, server_default="")
+    cost:          Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    installs:      Mapped[int | None]    = mapped_column(BigInteger)
+    clicks:        Mapped[int | None]    = mapped_column(BigInteger)
+    impressions:   Mapped[int | None]    = mapped_column(BigInteger)
+    synced_at:     Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GoogleInsightsDaily(Base):
+    __tablename__ = "google_insights_daily"
+    __table_args__ = (
+        UniqueConstraint("ad_id", "date", name="uq_google_insights_daily"),
+    )
+
+    ad_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    ad_group_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    campaign_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    impressions: Mapped[int | None] = mapped_column(BigInteger)
+    clicks: Mapped[int | None] = mapped_column(BigInteger)
+    spend: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    ctr: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    avg_cpm: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    avg_cpc: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    conversions: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    conversions_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    view_through_conversions: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
