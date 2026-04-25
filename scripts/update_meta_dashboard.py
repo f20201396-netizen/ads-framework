@@ -18,10 +18,14 @@ Targets: edit the TARGETS dict to update targets.
 """
 
 import argparse
+import json
 import os
+import smtplib
 import sys
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 import psycopg2
@@ -534,6 +538,7 @@ attr AS (
     GROUP BY ae.meta_creative_id
 )
 SELECT
+    m.ad_id,
     m.ad_name,
     c.name  AS campaign_name,
     s.name  AS adset_name,
@@ -624,6 +629,10 @@ def compute_ad_scores(rows: list) -> None:
         'AVERAGE':         'Run creative A/B test to improve rank',
         'UNDERPERFORMING': 'Cut budget 30% and test new creative',
         'POOR':            'Pause or overhaul — underperforms across metrics',
+        'INEFFICIENT CAT 1': 'KILL immediately — POOR grade burning >₹10k, highest waste',
+        'INEFFICIENT CAT 2': 'Pause within 24h — POOR grade, ₹5-10k spend, escalating waste',
+        'INEFFICIENT CAT 3': 'Cut budget 50% now — underperforming at >₹10k, diminishing returns',
+        'OPPORTUNITY':       'Scale aggressively — test campaign proving out at >₹10k, graduate to evergreen',
     }
     WEAK_NOTES = {
         'd6_cac':        'D6 CAC above peers → tighten audience or swap creative',
@@ -632,15 +641,24 @@ def compute_ad_scores(rows: list) -> None:
         'd0_cac':        'D0 CAC above peers → review creative-to-intent alignment',
     }
 
+    def _is_test_campaign(name: str) -> bool:
+        if not name:
+            return False
+        nl = name.lower()
+        return 'test' in nl or 'experiment' in nl or 'pilot' in nl
+
     for r in rows:
         fd = r.get('first_date')
         age_days = (today - fd).days if isinstance(fd, date) else 999
 
-        if age_days < 6:
+        # ── Maturity cohorts: D0-D2 = FULL IMMATURE, D3-D6 = PARTIAL IMMATURE ──
+        if age_days < 3:
             r['_score']      = None
-            r['_grade']      = 'IMMATURE'
-            r['_suggestion'] = f'Only {age_days}d of data — revisit after day 6'
+            r['_grade']      = 'FULL IMMATURE'
+            r['_suggestion'] = f'Only {age_days}d of data — too early to evaluate'
             continue
+
+        is_partial = age_days < 7  # D3-D6
 
         spend = float(r.get('spend') or 0)
         metric_scores: dict[str, tuple[float, float]] = {}   # key → (0-1 score, weight)
@@ -660,21 +678,47 @@ def compute_ad_scores(rows: list) -> None:
         total_w = sum(w for _, w in metric_scores.values())
         if total_w < 0.10:
             r['_score']      = None
-            r['_grade']      = 'NO DATA'
-            r['_suggestion'] = 'Insufficient metric data for scoring'
+            r['_grade']      = 'PARTIAL IMMATURE' if is_partial else 'NO DATA'
+            r['_suggestion'] = f'Only {age_days}d — partial data, revisit after day 7' if is_partial else 'Insufficient metric data for scoring'
             continue
 
         score = sum(s * w for s, w in metric_scores.values()) / total_w * 100
         r['_score'] = round(score, 1)
 
-        if   score >= 75: grade = 'TOP PERFORMER'
-        elif score >= 55: grade = 'GOOD'
-        elif score >= 35: grade = 'AVERAGE'
-        elif score >= 20: grade = 'UNDERPERFORMING'
-        else:             grade = 'POOR'
+        if   score >= 75: base_grade = 'TOP PERFORMER'
+        elif score >= 55: base_grade = 'GOOD'
+        elif score >= 35: base_grade = 'AVERAGE'
+        elif score >= 20: base_grade = 'UNDERPERFORMING'
+        else:             base_grade = 'POOR'
+
+        # ── Partial immature: score computed but flagged ──
+        if is_partial:
+            r['_grade'] = 'PARTIAL IMMATURE'
+            r['_suggestion'] = f'D{age_days} — early signal: {base_grade} (score {r["_score"]}) — revisit after day 7'
+            continue
+
+        # ── Spend-based overlay categories (ACTIVE ads only) ──
+        status      = (r.get('status') or '').upper()
+        camp_name   = r.get('campaign_name') or ''
+        is_active   = status == 'ACTIVE'
+
+        grade = base_grade  # default
+
+        if is_active and base_grade == 'POOR' and spend > 10_000:
+            grade = 'INEFFICIENT CAT 1'
+        elif is_active and base_grade == 'POOR' and spend >= 5_000:
+            grade = 'INEFFICIENT CAT 2'
+        elif is_active and base_grade == 'UNDERPERFORMING' and spend > 10_000:
+            grade = 'INEFFICIENT CAT 3'
+        elif _is_test_campaign(camp_name) and base_grade in ('AVERAGE', 'GOOD', 'TOP PERFORMER') and spend > 10_000:
+            grade = 'OPPORTUNITY'
+
         r['_grade'] = grade
 
-        if grade == 'TOP PERFORMER':
+        if grade in ('INEFFICIENT CAT 1', 'INEFFICIENT CAT 2', 'INEFFICIENT CAT 3', 'OPPORTUNITY'):
+            weakest = min(metric_scores, key=lambda k: metric_scores[k][0])
+            r['_suggestion'] = f"{ACTIONS[grade]} | Spend ₹{int(spend):,} | {WEAK_NOTES[weakest]}"
+        elif grade == 'TOP PERFORMER':
             r['_suggestion'] = ACTIONS['TOP PERFORMER']
         else:
             weakest = min(metric_scores, key=lambda k: metric_scores[k][0])
@@ -1098,7 +1142,7 @@ def write_ad_level_sheet(sh, rows: list):
             {"updateDimensionProperties": {
                 "range": {"sheetId": ws.id, "dimension": "COLUMNS",
                           "startIndex": IDX_GRADE, "endIndex": IDX_GRADE + 1},
-                "properties": {"pixelSize": 145}, "fields": "pixelSize",
+                "properties": {"pixelSize": 175}, "fields": "pixelSize",
             }},
             # Suggestion col — wide
             {"updateDimensionProperties": {
@@ -1171,8 +1215,21 @@ def write_ad_level_sheet(sh, rows: list):
                                     {"red": 0.525, "green": 0.161, "blue": 0.0}),
                 ("POOR",            {"red": 0.914, "green": 0.263, "blue": 0.208},
                                     {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
-                ("IMMATURE",        {"red": 0.800, "green": 0.824, "blue": 0.855},
+                # Inefficiency tiers — deep red / dark red / orange-red
+                ("INEFFICIENT CAT 1", {"red": 0.545, "green": 0.0,   "blue": 0.0},
+                                      {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+                ("INEFFICIENT CAT 2", {"red": 0.698, "green": 0.133, "blue": 0.133},
+                                      {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+                ("INEFFICIENT CAT 3", {"red": 0.804, "green": 0.361, "blue": 0.361},
+                                      {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+                # Opportunity — bright blue
+                ("OPPORTUNITY",       {"red": 0.118, "green": 0.533, "blue": 0.898},
+                                      {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+                # Maturity tiers
+                ("FULL IMMATURE",   {"red": 0.800, "green": 0.824, "blue": 0.855},
                                     {"red": 0.267, "green": 0.306, "blue": 0.365}),
+                ("PARTIAL IMMATURE", {"red": 0.878, "green": 0.890, "blue": 0.914},
+                                     {"red": 0.400, "green": 0.420, "blue": 0.470}),
                 ("NO DATA",         {"red": 0.910, "green": 0.910, "blue": 0.910},
                                     {"red": 0.4,   "green": 0.4,   "blue": 0.4}),
             ])],
@@ -1346,6 +1403,391 @@ def get_or_create_sheet(gc, sheet_id=None):
     return sh
 
 
+# ── Day-Level Ad Spend ─────────────���──────────────────────────────────────────
+DAY_LEVEL_SQL = """
+SELECT
+    i.date,
+    i.ad_id,
+    i.ad_name,
+    c.name                                                AS campaign_name,
+    s.name                                                AS adset_name,
+    ROUND(i.spend::numeric, 0)                            AS spend,
+    i.impressions,
+    i.clicks,
+    CASE WHEN i.impressions > 0
+         THEN ROUND(i.clicks::numeric * 100 / i.impressions, 3) END AS ctr,
+    CASE WHEN i.impressions > 0
+         THEN ROUND(i.spend::numeric * 1000 / i.impressions, 1) END AS cpm,
+    CASE WHEN i.clicks > 0
+         THEN ROUND(i.spend::numeric / i.clicks, 1) END  AS cpc
+FROM insights_daily i
+LEFT JOIN campaigns c ON c.id = i.campaign_id
+LEFT JOIN adsets s    ON s.id = i.adset_id
+WHERE i.attribution_window = '7d_click'
+  AND i.date >= %(mtd)s
+  AND i.spend > 0
+ORDER BY i.date DESC, i.spend DESC
+"""
+
+
+def build_day_level_data(conn, ad_rows: list) -> list:
+    """Fetch day-level spend and attach grade from scored ad_rows."""
+    grade_map = {str(r["ad_id"]): r.get("_grade", "") for r in ad_rows if r.get("ad_id")}
+    rows = q(conn, DAY_LEVEL_SQL, {"mtd": mtd_start})
+    for r in rows:
+        r["_grade"] = grade_map.get(str(r["ad_id"]), "")
+    return rows
+
+
+def write_day_level_sheet(sh, rows: list):
+    """Write 'Day Level — Ads' tab with per-ad per-day spend."""
+    try:
+        ws = sh.worksheet("Day Level — Ads")
+        ws.clear()
+    except Exception:
+        ws = sh.add_worksheet("Day Level — Ads", rows=max(len(rows) + 50, 6000), cols=15)
+
+    now_str = datetime.now().strftime("%d %b %Y, %H:%M IST")
+
+    headers = [
+        "Date", "Ad ID", "Ad Name", "Campaign", "Adset",
+        "Spend ₹", "Impressions", "Clicks", "CTR %", "CPM ₹", "CPC ₹",
+        "Grade",
+    ]
+    IDX_GRADE_DL = headers.index("Grade")
+
+    def _v(v):  return "" if v is None else v
+    def _i(v):  return "" if v is None else int(float(v))
+    def _f(v, d=2): return "" if v is None else round(float(v), d)
+
+    data_rows = [headers]
+    for r in rows:
+        data_rows.append([
+            str(r["date"]) if r["date"] else "",
+            r.get("ad_id") or "",
+            r.get("ad_name") or "",
+            r.get("campaign_name") or "",
+            r.get("adset_name") or "",
+            _i(r["spend"]),
+            _i(r["impressions"]),
+            _i(r["clicks"]),
+            _f(r["ctr"], 3),
+            _f(r["cpm"], 1),
+            _f(r["cpc"], 1),
+            r.get("_grade", ""),
+        ])
+
+    data_rows.append([])
+    data_rows.append([f"Last updated: {now_str}", f"{len(rows)} rows"])
+
+    ws.update(values=data_rows, range_name="A1")
+
+    # Formatting
+    body = {"requests": [
+        # Header row
+        {"repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1,
+                      "startColumnIndex": 0, "endColumnIndex": len(headers)},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 0.102, "green": 0.204, "blue": 0.376},
+                "textFormat": {"bold": True,
+                               "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                               "fontSize": 9},
+                "horizontalAlignment": "CENTER",
+                "wrapStrategy": "WRAP",
+            }},
+            "fields": "userEnteredFormat",
+        }},
+        # Freeze header + first 3 cols
+        {"updateSheetProperties": {
+            "properties": {"sheetId": ws.id,
+                           "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 3}},
+            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+        }},
+        # Column widths
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": 100}, "fields": "pixelSize",
+        }},
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": 1, "endIndex": 2},
+            "properties": {"pixelSize": 140}, "fields": "pixelSize",
+        }},
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": 2, "endIndex": 3},
+            "properties": {"pixelSize": 260}, "fields": "pixelSize",
+        }},
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": 3, "endIndex": 4},
+            "properties": {"pixelSize": 200}, "fields": "pixelSize",
+        }},
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": 4, "endIndex": 5},
+            "properties": {"pixelSize": 180}, "fields": "pixelSize",
+        }},
+        *[{"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": i, "endIndex": i + 1},
+            "properties": {"pixelSize": 95}, "fields": "pixelSize",
+        }} for i in range(5, IDX_GRADE_DL)],
+        # Grade column width
+        {"updateDimensionProperties": {
+            "range": {"sheetId": ws.id, "dimension": "COLUMNS",
+                      "startIndex": IDX_GRADE_DL, "endIndex": IDX_GRADE_DL + 1},
+            "properties": {"pixelSize": 175}, "fields": "pixelSize",
+        }},
+        # Alternating row shading (data cols, not grade)
+        {"addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{"sheetId": ws.id, "startRowIndex": 1,
+                            "endRowIndex": len(data_rows),
+                            "startColumnIndex": 0, "endColumnIndex": IDX_GRADE_DL}],
+                "booleanRule": {
+                    "condition": {"type": "CUSTOM_FORMULA",
+                                  "values": [{"userEnteredValue": "=ISEVEN(ROW())"}]},
+                    "format": {"backgroundColor": {"red": 0.957, "green": 0.965, "blue": 0.976}},
+                },
+            },
+            "index": 0,
+        }},
+        # Grade column — colour per label
+        *[{"addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{"sheetId": ws.id, "startRowIndex": 1,
+                            "endRowIndex": len(data_rows),
+                            "startColumnIndex": IDX_GRADE_DL, "endColumnIndex": IDX_GRADE_DL + 1}],
+                "booleanRule": {
+                    "condition": {"type": "TEXT_EQ",
+                                  "values": [{"userEnteredValue": label}]},
+                    "format": {"backgroundColor": bg,
+                               "textFormat": {"bold": True, "foregroundColor": fg}},
+                },
+            },
+            "index": idx + 1,
+        }} for idx, (label, bg, fg) in enumerate([
+            ("TOP PERFORMER",     {"red": 0.137, "green": 0.612, "blue": 0.290},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("GOOD",              {"red": 0.714, "green": 0.882, "blue": 0.722},
+                                  {"red": 0.0,   "green": 0.239, "blue": 0.086}),
+            ("AVERAGE",           {"red": 1.0,   "green": 0.898, "blue": 0.600},
+                                  {"red": 0.4,   "green": 0.267, "blue": 0.0}),
+            ("UNDERPERFORMING",   {"red": 1.0,   "green": 0.639, "blue": 0.353},
+                                  {"red": 0.525, "green": 0.161, "blue": 0.0}),
+            ("POOR",              {"red": 0.914, "green": 0.263, "blue": 0.208},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("INEFFICIENT CAT 1", {"red": 0.545, "green": 0.0,   "blue": 0.0},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("INEFFICIENT CAT 2", {"red": 0.698, "green": 0.133, "blue": 0.133},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("INEFFICIENT CAT 3", {"red": 0.804, "green": 0.361, "blue": 0.361},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("OPPORTUNITY",       {"red": 0.118, "green": 0.533, "blue": 0.898},
+                                  {"red": 1.0,   "green": 1.0,   "blue": 1.0}),
+            ("FULL IMMATURE",     {"red": 0.800, "green": 0.824, "blue": 0.855},
+                                  {"red": 0.267, "green": 0.306, "blue": 0.365}),
+            ("PARTIAL IMMATURE",  {"red": 0.878, "green": 0.890, "blue": 0.914},
+                                  {"red": 0.400, "green": 0.420, "blue": 0.470}),
+            ("NO DATA",           {"red": 0.910, "green": 0.910, "blue": 0.910},
+                                  {"red": 0.4,   "green": 0.4,   "blue": 0.4}),
+        ])],
+    ]}
+    sh.batch_update(body)
+    print(f"  Day Level tab: {len(rows)} rows written.")
+
+
+# ── Grade Movement Tracking & Email ───────────────────────────────────────────
+SNAPSHOT_FILE = Path(__file__).parent / ".grade_snapshot.json"
+EMAIL_RECIPIENTS = [
+    "pranit@univest.in",
+    "ripal.vachher@univest.in",
+    "anmol.gandhi@univest.in",
+]
+GMAIL_SENDER   = os.environ.get("GMAIL_SENDER", "")      # e.g. alerts@univest.in
+GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASSWORD", "") # Gmail app password
+
+ALL_GRADES = [
+    "INEFFICIENT CAT 1", "INEFFICIENT CAT 2", "INEFFICIENT CAT 3",
+    "POOR", "UNDERPERFORMING", "AVERAGE", "GOOD", "TOP PERFORMER",
+    "OPPORTUNITY", "PARTIAL IMMATURE", "FULL IMMATURE", "NO DATA",
+]
+
+
+def _load_snapshot() -> dict:
+    if SNAPSHOT_FILE.exists():
+        return json.loads(SNAPSHOT_FILE.read_text())
+    return {}
+
+
+def _save_snapshot(ad_rows: list):
+    snap = {}
+    for r in ad_rows:
+        ad_id = str(r.get("ad_id") or "")
+        grade = r.get("_grade", "")
+        if ad_id and grade:
+            snap[ad_id] = {
+                "grade": grade,
+                "ad_name": r.get("ad_name") or "",
+                "campaign": r.get("campaign_name") or "",
+                "spend": float(r.get("spend") or 0),
+            }
+    SNAPSHOT_FILE.write_text(json.dumps(snap, indent=2))
+
+
+def compute_grade_movements(ad_rows: list) -> dict:
+    """
+    Compare current grades with last snapshot.
+    Returns: {
+        "POOR → INEFFICIENT CAT 1": [{"ad_name": ..., "campaign": ..., "spend": ...}, ...],
+        ...
+    }
+    """
+    prev = _load_snapshot()
+    if not prev:
+        return {}
+
+    movements: dict[str, list] = {}
+    for r in ad_rows:
+        ad_id = str(r.get("ad_id") or "")
+        new_grade = r.get("_grade", "")
+        if not ad_id or not new_grade:
+            continue
+        old = prev.get(ad_id)
+        if not old:
+            continue
+        old_grade = old.get("grade", "")
+        if old_grade and old_grade != new_grade:
+            key = f"{old_grade} → {new_grade}"
+            if key not in movements:
+                movements[key] = []
+            movements[key].append({
+                "ad_name": r.get("ad_name") or "",
+                "campaign": r.get("campaign_name") or "",
+                "spend": float(r.get("spend") or 0),
+            })
+
+    return movements
+
+
+def _build_movement_summary(movements: dict) -> dict:
+    """Build a summary: {grade: {"in": count, "out": count}} for net flow."""
+    summary: dict[str, dict[str, int]] = {g: {"in": 0, "out": 0} for g in ALL_GRADES}
+    for transition, ads in movements.items():
+        old_g, new_g = transition.split(" → ")
+        count = len(ads)
+        if old_g in summary:
+            summary[old_g]["out"] += count
+        if new_g in summary:
+            summary[new_g]["in"] += count
+    return summary
+
+
+def build_movement_email_html(movements: dict) -> str:
+    """Build an HTML email body for grade movements."""
+    now_str = datetime.now().strftime("%d %b %Y, %H:%M IST")
+    summary = _build_movement_summary(movements)
+
+    html = f"""
+    <html><body style="font-family: -apple-system, Arial, sans-serif; color: #1a1a2e; padding: 20px;">
+    <h2 style="margin-bottom: 4px;">Ad Grade Movement Report</h2>
+    <p style="color: #666; margin-top: 0;">{now_str}</p>
+
+    <h3>Category Summary</h3>
+    <table style="border-collapse: collapse; width: 100%; max-width: 650px;">
+    <tr style="background: #1a3461; color: white;">
+        <th style="padding: 8px 12px; text-align: left;">Category</th>
+        <th style="padding: 8px 12px; text-align: center;">Moved In</th>
+        <th style="padding: 8px 12px; text-align: center;">Moved Out</th>
+        <th style="padding: 8px 12px; text-align: center;">Net</th>
+    </tr>"""
+
+    GRADE_COLORS = {
+        "INEFFICIENT CAT 1": "#8b0000", "INEFFICIENT CAT 2": "#b22222",
+        "INEFFICIENT CAT 3": "#cd5c5c", "POOR": "#e94335",
+        "UNDERPERFORMING": "#ff7f50", "AVERAGE": "#e5b800",
+        "GOOD": "#4caf50", "TOP PERFORMER": "#238b4a",
+        "OPPORTUNITY": "#1e88e5",
+        "PARTIAL IMMATURE": "#b0bec5", "FULL IMMATURE": "#90a4ae",
+        "NO DATA": "#e0e0e0",
+    }
+
+    for grade in ALL_GRADES:
+        s = summary.get(grade, {"in": 0, "out": 0})
+        if s["in"] == 0 and s["out"] == 0:
+            continue
+        net = s["in"] - s["out"]
+        net_str = f"+{net}" if net > 0 else str(net)
+        net_color = "#238b4a" if net > 0 else "#e94335" if net < 0 else "#666"
+        bg = "#f8f9fa" if ALL_GRADES.index(grade) % 2 == 0 else "#fff"
+        gc = GRADE_COLORS.get(grade, "#333")
+        html += f"""
+    <tr style="background: {bg};">
+        <td style="padding: 8px 12px;"><span style="color: {gc}; font-weight: bold;">{'●'} {grade}</span></td>
+        <td style="padding: 8px 12px; text-align: center; color: #238b4a;">{s['in'] if s['in'] else '—'}</td>
+        <td style="padding: 8px 12px; text-align: center; color: #e94335;">{s['out'] if s['out'] else '—'}</td>
+        <td style="padding: 8px 12px; text-align: center; color: {net_color}; font-weight: bold;">{net_str}</td>
+    </tr>"""
+
+    html += "</table>"
+
+    # Detail section: list transitions with top ads
+    html += "<h3>Movement Details</h3>"
+    for transition, ads in sorted(movements.items(), key=lambda x: -len(x[1])):
+        total_spend = sum(a["spend"] for a in ads)
+        html += f"""
+    <div style="margin-bottom: 16px; padding: 12px; background: #f8f9fa; border-left: 4px solid #1a3461; border-radius: 4px;">
+        <strong>{transition}</strong> — {len(ads)} ad{'s' if len(ads) != 1 else ''} (₹{int(total_spend):,} spend)
+        <ul style="margin: 6px 0 0 0; padding-left: 20px; color: #444;">"""
+        for a in sorted(ads, key=lambda x: -x["spend"])[:5]:
+            html += f"""
+            <li>{a['ad_name']} <span style="color: #888;">— {a['campaign'][:50]} — ₹{int(a['spend']):,}</span></li>"""
+        if len(ads) > 5:
+            html += f"""
+            <li style="color: #888;">... and {len(ads) - 5} more</li>"""
+        html += """
+        </ul>
+    </div>"""
+
+    html += """
+    <p style="color: #999; font-size: 12px; margin-top: 24px;">
+        Sent automatically by Univest Ads Dashboard.
+        <a href="https://docs.google.com/spreadsheets/d/1EBu7vZWGdLUVdL4I6a0J22soLIoXKWWIRRWTGk3BZ7s">Open Sheet</a>
+    </p>
+    </body></html>"""
+    return html
+
+
+def send_movement_email(movements: dict):
+    """Send grade movement email via Gmail SMTP."""
+    if not GMAIL_SENDER or not GMAIL_APP_PASS:
+        print("  Email: skipped (GMAIL_SENDER / GMAIL_APP_PASSWORD not set)")
+        return
+    if not movements:
+        print("  Email: skipped (no grade movements)")
+        return
+
+    total_moves = sum(len(ads) for ads in movements.values())
+    html = build_movement_email_html(movements)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[Ads Dashboard] {total_moves} ad{'s' if total_moves != 1 else ''} changed grade — {datetime.now().strftime('%d %b %H:%M')}"
+    msg["From"]    = GMAIL_SENDER
+    msg["To"]      = ", ".join(EMAIL_RECIPIENTS)
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_SENDER, GMAIL_APP_PASS)
+            server.sendmail(GMAIL_SENDER, EMAIL_RECIPIENTS, msg.as_string())
+        print(f"  Email: sent to {len(EMAIL_RECIPIENTS)} recipients ({total_moves} movements)")
+    except Exception as exc:
+        print(f"  Email: FAILED — {exc}")
+
+
 def main():
     import gspread
     from google.oauth2.service_account import Credentials
@@ -1366,7 +1808,16 @@ def main():
     dod_rows = build_dod_data(conn)
     print("Fetching platform ROAS data...")
     platform_data = build_platform_roas_data(conn)
+    print("Fetching day-level ad spend...")
+    day_rows = build_day_level_data(conn, ad_rows)
+    print(f"  {len(day_rows)} day-level rows found.")
     conn.close()
+
+    # Grade movement tracking
+    print("Checking grade movements...")
+    movements = compute_grade_movements(ad_rows)
+    _save_snapshot(ad_rows)
+    send_movement_email(movements)
 
     print("Connecting to Google Sheets...")
     creds = Credentials.from_service_account_file(
@@ -1382,6 +1833,7 @@ def main():
     write_ad_level_sheet(sh, ad_rows)
     write_dod_sheet(sh, dod_rows)
     write_platform_roas_sheet(sh, platform_data)
+    write_day_level_sheet(sh, day_rows)
     print(f"\nDone. Open sheet: {sh.url}")
     print(f"Sheet ID (save for --sheet-id): {sh.id}")
 
