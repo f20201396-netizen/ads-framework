@@ -172,6 +172,33 @@ def _parse_row(row: dict) -> dict:
 # sync_attribution_signups
 # ---------------------------------------------------------------------------
 
+_RETRYABLE_BQ_ERRORS = (
+    "canceling statement", "terminating connection",
+    "server closed the connection", "Failed to fetch row",
+)
+
+
+async def _stream_with_retry(bq, sql, label, max_retries=4):
+    """Run bq.stream_rows with exponential backoff on transient prod-replica errors."""
+    import asyncio
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, lambda s=sql: bq.stream_rows(s, label=label)
+            )
+        except Exception as e:
+            msg = str(e)
+            last_err = e
+            if not any(t in msg for t in _RETRYABLE_BQ_ERRORS):
+                raise
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+            log.warning("%s transient BQ error (attempt %d/%d, waiting %ds): %s",
+                        label, attempt + 1, max_retries, wait, msg[:200])
+            await asyncio.sleep(wait)
+    raise last_err
+
+
 async def sync_attribution_signups():
     """Ingest new user signups with Singular attribution."""
     bq = BQClient()
@@ -195,9 +222,7 @@ async def sync_attribution_signups():
             return
 
         t0 = time.monotonic()
-        raw_rows, bytes_proc = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: bq.stream_rows(sql, label="signups")
-        )
+        raw_rows, bytes_proc = await _stream_with_retry(bq, sql, "signups")
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         parsed = [_parse_row(r) for r in raw_rows]
@@ -239,9 +264,7 @@ async def sync_attribution_conversions():
             return
 
         t0 = time.monotonic()
-        raw_rows, bytes_proc = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: bq.stream_rows(sql, label="conversions")
-        )
+        raw_rows, bytes_proc = await _stream_with_retry(bq, sql, "conversions")
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         parsed = [_parse_row(r) for r in raw_rows]

@@ -192,16 +192,16 @@ class MetaClient:
         ad_account_id: str,
         statuses: list[str] | None = None,
     ) -> AsyncIterator[dict]:
-        """§3 — Most-recent 500 live ad sets, single API call, no pagination."""
+        """§3 — Live ad sets, paginated. Page size kept small to avoid Meta
+        HTTP 500 'reduce data' on accounts with many adsets."""
         live = statuses or ["ACTIVE", "PAUSED", "IN_PROCESS", "WITH_ISSUES"]
         filtering = json.dumps([
             {"field": "effective_status", "operator": "IN", "value": live},
         ])
-        data = await self._request(
-            f"{self._base}/{ad_account_id}/adsets",
-            {"fields": ADSET_FIELDS, "filtering": filtering, "limit": 500},
-        )
-        for item in data.get("data", []):
+        async for item in self._paginate(
+            f"{ad_account_id}/adsets",
+            {"fields": ADSET_FIELDS, "filtering": filtering, "limit": 100},
+        ):
             yield item
 
     # ------------------------------------------------------------------ #
@@ -213,20 +213,20 @@ class MetaClient:
         ad_account_id: str,
         statuses: list[str] | None = None,
     ) -> AsyncIterator[dict]:
-        """§4 — Live ads (ACTIVE/PAUSED/WITH_ISSUES/IN_PROCESS only).
+        """§4 — Live ads (ACTIVE/PAUSED/WITH_ISSUES/IN_PROCESS), paginated.
 
-        Same rationale as list_adsets — excludes DELETED/ARCHIVED to stay
-        within the 200-call/hour rate limit.
+        Excludes DELETED/ARCHIVED. Page size kept small (limit=100) to avoid
+        Meta HTTP 500 'reduce data' which fires when the response payload is
+        too large for the AD_FIELDS set.
         """
         live = statuses or ["ACTIVE", "PAUSED", "IN_PROCESS", "WITH_ISSUES"]
         filtering = json.dumps([
             {"field": "effective_status", "operator": "IN", "value": live},
         ])
-        data = await self._request(
-            f"{self._base}/{ad_account_id}/ads",
-            {"fields": AD_FIELDS, "filtering": filtering, "limit": 500},
-        )
-        for item in data.get("data", []):
+        async for item in self._paginate(
+            f"{ad_account_id}/ads",
+            {"fields": AD_FIELDS, "filtering": filtering, "limit": 100},
+        ):
             yield item
 
     # ------------------------------------------------------------------ #
@@ -426,6 +426,33 @@ class MetaClient:
         """§11 — Ads volume for the account."""
         return await self._get(f"{ad_account_id}/ads_volume")
 
+    async def list_activities(
+        self,
+        ad_account_id: str,
+        since: "datetime | None" = None,
+        until: "datetime | None" = None,
+        limit: int = 100,
+    ) -> AsyncIterator[dict]:
+        """Account audit-log events (status edits, budget changes, creative updates, etc.).
+
+        Backed by GET /{ad_account_id}/activities. Each yielded dict has fields like
+        event_type, event_time, actor_id, actor_name, object_id/type/name, extra_data.
+        Pagination follows paging.next exactly like the other list endpoints.
+        """
+        fields = (
+            "event_type,event_time,translated_event_type,"
+            "actor_id,actor_name,"
+            "object_id,object_type,object_name,"
+            "application_id,application_name,extra_data"
+        )
+        params: dict = {"fields": fields, "limit": limit}
+        if since is not None:
+            params["since"] = int(since.timestamp())
+        if until is not None:
+            params["until"] = int(until.timestamp())
+        async for item in self._paginate(f"{ad_account_id}/activities", params):
+            yield item
+
     async def get_assigned_users(self, ad_account_id: str) -> list[dict]:
         """§11 — Users assigned to the account."""
         results: list[dict] = []
@@ -447,12 +474,15 @@ class MetaClient:
         Each request dict: {"method": "GET", "relative_url": "act_123/campaigns?..."}
         Returns a list of sub-responses (each has "code" and "body" as a JSON string).
         """
+        data = {
+            "access_token": self._token,
+            "batch": json.dumps(requests),
+        }
+        if self._appsecret_proof:
+            data["appsecret_proof"] = self._appsecret_proof
         resp = await self._http.post(
             f"{self._base}/",
-            data={
-                "access_token": self._token,
-                "batch": json.dumps(requests),
-            },
+            data=data,
             timeout=120,
         )
         await self._rl.record(resp.headers, "batch")

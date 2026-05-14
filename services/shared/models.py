@@ -795,3 +795,33 @@ class GoogleInsightsDaily(Base):
     view_through_conversions: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+
+class MetaChangeLog(Base):
+    """One row per Meta Ads Activity (audit-log) event.
+
+    Sourced from GET /{ad_account_id}/activities; ingested incrementally
+    with watermark = max(event_time) per account_id.
+    """
+    __tablename__ = "meta_change_log"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "event_time", "event_type", "object_id", "actor_id",
+            name="uq_meta_change_log_dedup",
+        ),
+    )
+
+    id: Mapped[int]                 = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    account_id: Mapped[str]         = mapped_column(Text, nullable=False)
+    event_time: Mapped[datetime]    = mapped_column(DateTime(timezone=True), nullable=False)
+    event_type: Mapped[str]         = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str | None]    = mapped_column(Text)
+    actor_name: Mapped[str | None]  = mapped_column(Text)
+    object_id: Mapped[str | None]   = mapped_column(Text)
+    object_type: Mapped[str | None] = mapped_column(Text)
+    object_name: Mapped[str | None] = mapped_column(Text)
+    translated_event_type: Mapped[str | None] = mapped_column(Text)
+    application_id: Mapped[str | None]   = mapped_column(Text)
+    application_name: Mapped[str | None] = mapped_column(Text)
+    extra_data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")

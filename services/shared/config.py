@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     google_ads_customer_id: str = ""
     google_ads_login_customer_id: str = ""
 
+    # Gmail (grade movement alerts)
+    gmail_sender: str = ""
+    gmail_app_password: str = ""
+
     @property
     def ad_account_id_list(self) -> list[str]:
         return [a.strip() for a in self.meta_ad_account_ids.split(",") if a.strip()]

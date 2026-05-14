@@ -7,6 +7,7 @@ Order (FK-safe):
   businesses → ad_accounts → campaigns → ad_creatives → adsets → ads
 """
 
+import json
 import logging
 
 import httpx
@@ -131,6 +132,86 @@ async def _sync_one_account(client: MetaClient, account_id: str) -> None:
             log.info("ads: skipped %d ads whose adset_id is not in synced set", skipped)
         async with AsyncSessionLocal() as session:
             await upsert_dims(session, _models().Ad, rows)
+
+
+async def sync_ad_statuses() -> None:
+    """Lightweight status sync via Meta Batch API.
+
+    Fetches the live status of every ad with spend in the last 14 days plus
+    any locally-ACTIVE ad. Covers both pause→active and active→pause
+    transitions so the dashboard never shows a stale status. Still cheap
+    relative to a full sync_account_structure() — typically <30 batch calls.
+    """
+    log.info("sync_ad_statuses: starting")
+    from sqlalchemy import text
+
+    # 1. Any ad with recent spend OR currently marked ACTIVE — covers
+    #    both "paused on Meta but our DB says ACTIVE" and "resurrected
+    #    on Meta but our DB still has stale paused/inactive status".
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text("""
+            SELECT DISTINCT a.id FROM ads a
+            WHERE a.effective_status = 'ACTIVE'
+               OR EXISTS (
+                   SELECT 1 FROM insights_daily i
+                   WHERE i.ad_id = a.id
+                     AND i.date >= CURRENT_DATE - 14
+                     AND i.spend > 0
+               )
+        """))
+        target_ids = [row[0] for row in result.fetchall()]
+
+    if not target_ids:
+        log.info("sync_ad_statuses: no candidate ads, skipping")
+        return
+
+    log.info("sync_ad_statuses: checking %d ads (active or recent spend)", len(target_ids))
+
+    # 2. Batch-check live status (50 per request).
+    #    Always overwrite local rows with what Meta returns — even if the
+    #    new value equals the old one — so this is also a self-healing pass.
+    updates: list[tuple[str, str, str, str]] = []
+    async with httpx.AsyncClient() as http:
+        for account_id in settings.ad_account_id_list:
+            rl = RateLimiter(db_factory=AsyncSessionLocal, account_id=account_id)
+            client = MetaClient(
+                access_token=settings.meta_access_token,
+                app_secret=settings.meta_app_secret,
+                http_client=http,
+                rate_limiter=rl,
+            )
+
+            for i in range(0, len(target_ids), 50):
+                batch = target_ids[i : i + 50]
+                batch_requests = [
+                    {"method": "GET", "relative_url": f"{aid}?fields=id,status,effective_status,configured_status"}
+                    for aid in batch
+                ]
+                results = await client.batch(batch_requests)
+                for resp in results:
+                    body = json.loads(resp["body"])
+                    if "error" in body:
+                        continue
+                    updates.append((
+                        body.get("status", ""),
+                        body.get("effective_status", ""),
+                        body.get("configured_status", ""),
+                        body["id"],
+                    ))
+
+    if updates:
+        async with AsyncSessionLocal() as session:
+            for status, eff_status, conf_status, aid in updates:
+                await session.execute(
+                    text(
+                        "UPDATE ads SET status = :s, effective_status = :es, "
+                        "configured_status = :cs WHERE id = :id"
+                    ),
+                    {"s": status, "es": eff_status, "cs": conf_status, "id": aid},
+                )
+            await session.commit()
+
+    log.info("sync_ad_statuses: done — %d ads refreshed", len(updates))
 
 
 def _models():

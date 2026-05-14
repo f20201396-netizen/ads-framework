@@ -30,6 +30,7 @@ from services.worker.jobs.sync_aux import sync_audiences_pixels_catalogs, sync_p
 from services.worker.jobs.sync_breakdowns import sync_insights_breakdowns
 from services.worker.jobs.sync_higher_levels import sync_insights_higher_levels
 from services.worker.jobs.sync_insights import sync_insights_daily
+from services.worker.jobs.sync_change_log import sync_change_log
 from services.worker.jobs.sync_structure import sync_account_structure
 from services.worker.jobs.sync_google_structure import sync_google_structure
 from services.worker.jobs.sync_google_insights import sync_google_insights_daily
@@ -114,6 +115,13 @@ async def main() -> None:
         sync_pixel_stats,
         CronTrigger(hour=21, minute=30, timezone="UTC"),
         id="sync_pixel_stats",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        sync_change_log,
+        IntervalTrigger(minutes=15),
+        id="sync_change_log",
         max_instances=1,
         coalesce=True,
     )

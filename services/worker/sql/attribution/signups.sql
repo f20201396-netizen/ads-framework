@@ -15,7 +15,9 @@ SELECT
     'signup_' || u.id::text                                      AS id,
     u.id::bigint                                                 AS user_id,
     'signup'                                                     AS event_name,
-    u.created_at                                                 AS event_time,
+    -- Prod stores naive timestamps in IST clock values, so we treat them as
+    -- 'Asia/Kolkata' to produce a correct UTC TIMESTAMPTZ for event_time
+    (u.created_at AT TIME ZONE 'Asia/Kolkata')                   AS event_time,
     DATE(u.created_at)                                           AS install_date,
     0                                                            AS days_since_signup,
 
@@ -63,6 +65,21 @@ SELECT
 FROM users u
 LEFT JOIN user_additional_details uad ON uad.user_id = u.id
 LEFT JOIN user_devices             ud  ON ud.user_id  = u.id
-WHERE u.created_at >= '{since}'
-  AND u.created_at <  '{until}'
+WHERE (u.created_at AT TIME ZONE 'Asia/Kolkata') >= '{since}'
+  AND (u.created_at AT TIME ZONE 'Asia/Kolkata') <  '{until}'
+  -- Mirror the marketing team's Metabase report user-side exclusions
+  AND u.referred_by IS NULL
+  AND u.user_interest IS NULL
+  AND EXISTS (
+        SELECT 1 FROM user_devices ud2
+        WHERE ud2.user_id = u.id
+          AND ud2.os IN ('android', 'Android Web')
+      )
+  AND NOT EXISTS (
+        SELECT 1 FROM "Demat_Campaigns" dc
+        WHERE dc."Adset ID" = uad.tracker_sub_campaign_id
+          AND dc."Adset ID" IS NOT NULL
+          AND TRIM(dc."Adset ID") <> ''
+      )
+  AND (uad.network ILIKE '%Facebook%' OR uad.network ILIKE '%Instagram%')
 ORDER BY u.created_at
