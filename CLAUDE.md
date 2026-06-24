@@ -116,13 +116,32 @@ BQ connection: `projects/univest-applications/locations/asia-south2/connections/
 Every attribution query hits prod Postgres in real time — keep them bounded.
 
 ### Attribution model
-One row per user in `user_additional_details` (install-time Singular data).
-Join keys to Meta:
+
+**MMP cutover — 2026-06-18.** Attribution source switched from Singular to AppsFlyer. A hard
+cut on `DATE(users.created_at)` decides which source a signup uses (no Singular fallback for
+post-cut users); pre-cut history stays Singular. Both branches live in `signups.sql` /
+`conversions.sql` (and the dashboard Appography query), gated by `DATE(u.created_at) >= '2026-06-18'`.
+
+**Post-cutover (AppsFlyer) — `appsflyer_push_events`, event-level (many rows/user):**
+- Signup event = `event_name = 'Sign_Up_Success'`; Meta filter = `media_source = 'Facebook Ads'`
+  (Instagram is the `af_channel` sub-platform, NOT a separate media_source).
+- The display-name columns (`campaign` / `af_adset` / `af_ad`) are NOT join keys. The numeric
+  18-digit Meta ids live in `raw_payload` JSONB:
+  - `raw_payload->>'af_c_id'` → `meta_campaign_id`
+  - `raw_payload->>'af_adset_id'` → `meta_adset_id`
+  - `raw_payload->>'af_ad_id'` → `meta_creative_id`
+- `customer_user_id` = `users.id`. Dedup to one signup row/user via `DISTINCT ON (customer_user_id)
+  ORDER BY event_time` (earliest wins). Coverage on Facebook signups: campaign 100%, adset/ad ~97%.
+- `publisher_site` ← `af_channel` (sparse ~15-20%); `network` stored as `'Facebook'`.
+
+**Pre-cutover (Singular) — `user_additional_details`, one row per user (install-time):**
 - `tracker_campaign_id` → `meta_campaign_id`
 - `tracker_sub_campaign_id` → `meta_adset_id`
 - `tracker_creative_id` → `meta_creative_id` (16-18 digit IDs matching Meta format)
+- Only Meta network value: `'Facebook'`; sub-platform (Instagram vs Facebook) in `partner_site`.
 
-Only Meta network value in prod: `'Facebook'`. Sub-platform (Instagram vs Facebook) is in `partner_site`.
+Either way the join keys stored in `attribution_events` are the same numeric Meta ids, so MVs,
+the `/conversions/*` API, scoring, and dashboards are unchanged across the cutover.
 
 ### Revenue source
 `user_transaction_history WHERE status = 'CHARGED'`

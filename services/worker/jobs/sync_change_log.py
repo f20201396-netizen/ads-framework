@@ -1,8 +1,10 @@
-"""Sync Meta Ads change log (account audit log) into meta_change_log.
+"""Sync Meta Ads change log (bid + budget edits only) into meta_change_log.
 
-Pulls from Meta's GET /{ad_account_id}/activities. Watermark is max(event_time)
-per account in our local DB — first run grabs the most recent N events, every
-subsequent run pulls only events newer than what we already have.
+Pulls from Meta's GET /{ad_account_id}/activities with a server-side category
+filter so we only fetch BID and BUDGET events — the full firehose used to take
+1+ hours per run on this account. Watermark is max(event_time) per account in
+our local DB — first run grabs the most recent N days, every subsequent run
+pulls only events newer than what we already have.
 """
 
 from __future__ import annotations
@@ -24,7 +26,13 @@ from services.shared.rate_limiter import RateLimiter
 
 log = logging.getLogger(__name__)
 
-INITIAL_LOOKBACK_DAYS = 15  # first run pulls every event within this window
+INITIAL_LOOKBACK_DAYS = 30  # first-run lookback (Meta's `since` is wider so we
+                            # over-pull, then SQL trims to whatever the dashboard
+                            # actually shows)
+
+# Meta's /activities endpoint only accepts one category per call, so we sweep
+# the two we care about. Adding STATUS / ACCOUNT here would re-broaden the pull.
+CATEGORIES = ("BID", "BUDGET")
 
 
 def _parse_event_time(raw: Any) -> datetime | None:
@@ -97,28 +105,55 @@ async def sync_change_log() -> None:
             async with AsyncSessionLocal() as session:
                 last_seen = await _watermark(session, account_id)
 
+            # Buffer-and-flush: upsert every FLUSH_EVERY rows so a mid-pagination
+            # network drop (httpx.ReadError) doesn't lose every previous page.
+            FLUSH_EVERY = 100
+            buf: list[dict] = []
+            total_fetched = 0
+            total_inserted = 0
+
+            async def _flush() -> None:
+                nonlocal total_inserted, buf
+                if not buf:
+                    return
+                async with AsyncSessionLocal() as session:
+                    inserted = await _upsert(session, buf)
+                    await session.commit()
+                total_inserted += inserted
+                buf = []
+
             if last_seen is None:
-                # First run for this account — pull every event from the last N days
                 since = datetime.now(tz=timezone.utc) - timedelta(days=INITIAL_LOOKBACK_DAYS)
                 log.info("sync_change_log %s: first run, pulling since=%s (last %dd)",
                          account_id, since, INITIAL_LOOKBACK_DAYS)
-                rows = []
-                async for raw in client.list_activities(account_id, since=since):
-                    parsed = _parse_row(account_id, raw)
-                    if parsed:
-                        rows.append(parsed)
             else:
-                # Incremental — pull events strictly after our watermark
+                since = last_seen
                 log.info("sync_change_log %s: incremental since=%s", account_id, last_seen)
-                rows = []
-                async for raw in client.list_activities(account_id, since=last_seen):
-                    parsed = _parse_row(account_id, raw)
-                    if parsed and parsed["event_time"] > last_seen:
-                        rows.append(parsed)
 
-            async with AsyncSessionLocal() as session:
-                inserted = await _upsert(session, rows)
-                await session.commit()
-            log.info("sync_change_log %s: fetched=%d, inserted=%d", account_id, len(rows), inserted)
+            for cat in CATEGORIES:
+                try:
+                    async for raw in client.list_activities(account_id, since=since, category=cat):
+                        parsed = _parse_row(account_id, raw)
+                        if not parsed:
+                            continue
+                        if last_seen is not None and parsed["event_time"] <= last_seen:
+                            continue
+                        buf.append(parsed)
+                        total_fetched += 1
+                        if len(buf) >= FLUSH_EVERY:
+                            await _flush()
+                except Exception:
+                    # Persist whatever we got before moving to the next category —
+                    # beats losing the lot to one bad page.
+                    log.exception("sync_change_log %s [%s]: pagination failed; flushing %d buffered rows",
+                                  account_id, cat, len(buf))
+                    await _flush()
+                    # Continue to next category rather than re-raising — one
+                    # broken category shouldn't blank the other.
+                    continue
+
+            await _flush()
+            log.info("sync_change_log %s: fetched=%d, inserted=%d",
+                     account_id, total_fetched, total_inserted)
 
     log.info("sync_change_log: done")

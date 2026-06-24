@@ -9,3 +9,5 @@ venv/
 *.log
 .DS_Store
 scripts/.grade_snapshot.json
+.claude/
+*.csv

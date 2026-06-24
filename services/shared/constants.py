@@ -3,7 +3,7 @@ Field lists and enums extracted verbatim from scripts/meta-ads-full-fetch-curl.s
 Every constant here has a 1-to-1 mapping with a --data-urlencode in the script.
 """
 
-BASE_URL = "https://graph.facebook.com/v21.0"
+BASE_URL = "https://graph.facebook.com/v23.0"
 
 # ---------------------------------------------------------------------------
 # §1 — Business Manager + Ad Accounts
@@ -214,10 +214,10 @@ CUSTOM_AUDIENCE_FIELDS = (
 # ---------------------------------------------------------------------------
 
 ADS_PIXEL_FIELDS = (
-    "id,name,code,last_fired_time,is_created_by_business,is_unavailable,"
-    "automatic_matching_fields,data_use_setting,first_party_cookie_status,"
-    "enable_automatic_matching,can_proxy,owner_business,owner_ad_account,"
-    "creation_time"
+    # Bare minimum — Dev-Tier rejects most pixel fields with code 200
+    # "ads_management not granted" even when the token *has* ads_management.
+    # Only id/name/is_unavailable/creation_time return cleanly on this tier.
+    "id,name,is_unavailable,creation_time"
 )
 
 CUSTOM_CONVERSION_FIELDS = (

@@ -174,19 +174,49 @@ def _parse_pixel_stats(data: dict, pixel_id: str, account_id: str) -> list[dict]
     {"data": [{"event": "Purchase", "count": 42, "start_time": "...", ...}]}
     We store one row per (pixel_id, date, event_name).
     """
-    rows = []
-    for entry in data.get("data", []):
-        # start_time is a Unix timestamp; derive date from it
-        start_time = entry.get("start_time")
-        if start_time:
-            event_date = datetime.fromtimestamp(int(start_time), UTC).date().isoformat()
-        else:
+    # Meta returns one entry per (event, time-bucket) — usually hourly. We
+    # aggregate to daily here, because the upsert uses
+    # on_conflict_do_update(count = EXCLUDED.count) which would otherwise
+    # overwrite earlier hours' counts instead of summing.
+    # Response shape (v23+):
+    #   {"data": [
+    #      {"start_time": "<ISO-8601>", "aggregation": "event",
+    #       "data": [{"value": "Subscribe", "count": 3}, ...]},
+    #      ... one bucket per hour
+    #   ]}
+    # We aggregate hourly buckets → daily, summing counts per event name.
+    from datetime import date as _date_type
+    daily: dict[tuple[_date_type, str], int] = {}
+    for bucket in data.get("data", []):
+        start_time = bucket.get("start_time")
+        if not start_time:
             continue
-        rows.append({
-            "pixel_id": pixel_id,
-            "account_id": account_id,
-            "date": event_date,
-            "event_name": entry.get("event", "unknown"),
-            "count": entry.get("count"),
-        })
-    return rows
+        event_date: _date_type | None = None
+        try:
+            event_date = datetime.fromtimestamp(int(start_time), UTC).date()
+        except (TypeError, ValueError):
+            s = str(start_time)
+            if len(s) >= 5 and s[-5] in "+-" and s[-3] != ":":
+                s = s[:-2] + ":" + s[-2:]
+            try:
+                event_date = datetime.fromisoformat(s).date()
+            except ValueError:
+                continue
+        if event_date is None:
+            continue
+        for entry in bucket.get("data") or []:
+            event_name = entry.get("value") or entry.get("event") or "unknown"
+            try:
+                count = int(entry.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0:
+                continue
+            key = (event_date, event_name)
+            daily[key] = daily.get(key, 0) + count
+
+    return [
+        {"pixel_id": pixel_id, "account_id": account_id,
+         "date": d, "event_name": e, "count": c}
+        for (d, e), c in daily.items()
+    ]

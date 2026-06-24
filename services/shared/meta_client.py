@@ -60,8 +60,12 @@ log = logging.getLogger(__name__)
 # 80004 = Ads Management API rate limit (HTTP 400, distinct from 429)
 _META_RETRYABLE = {1, 2, 4, 17, 32, 613, 80004}
 
-# Threshold beyond which get_insights() submits an async report job
-_ASYNC_REPORT_THRESHOLD_DEFAULT = 30
+# Threshold beyond which get_insights() submits an async report job.
+# -1 means *always* use async — needed because sync /insights pagination
+# truncates at Meta's top-500 per page on Dev-Tier and pages 2+ keep
+# tripping the user-level rate limit, so we silently miss long-tail ads.
+# Async reports return the full result set in one batched job.
+_ASYNC_REPORT_THRESHOLD_DEFAULT = -1
 
 
 # ---------------------------------------------------------------------------
@@ -299,8 +303,24 @@ class MetaClient:
                 use_async_if_range_days_gt,
                 object_id,
             )
-            async for item in self._async_report(object_id, params):
-                yield item
+            # Async report can return "Job Failed" non-deterministically for
+            # same-day pulls — Meta is still aggregating today's data and
+            # async workers occasionally abort mid-job. Fall back to sync
+            # pagination so today's spend still shows up (top-500 cap is a
+            # known limitation but better than no data at all).
+            try:
+                async for item in self._async_report(object_id, params):
+                    yield item
+            except RuntimeError as e:
+                if "Job Failed" in str(e):
+                    log.warning(
+                        "Async report failed for %s — falling back to sync pagination",
+                        object_id,
+                    )
+                    async for item in self._paginate(f"{object_id}/insights", params):
+                        yield item
+                else:
+                    raise
         else:
             async for item in self._paginate(f"{object_id}/insights", params):
                 yield item
@@ -432,12 +452,17 @@ class MetaClient:
         since: "datetime | None" = None,
         until: "datetime | None" = None,
         limit: int = 100,
+        category: str | None = None,
     ) -> AsyncIterator[dict]:
         """Account audit-log events (status edits, budget changes, creative updates, etc.).
 
         Backed by GET /{ad_account_id}/activities. Each yielded dict has fields like
         event_type, event_time, actor_id, actor_name, object_id/type/name, extra_data.
         Pagination follows paging.next exactly like the other list endpoints.
+
+        `category`, when set, restricts the server-side result to one of Meta's
+        activity categories (e.g. "BID", "BUDGET", "ACCOUNT"). Without it, Meta
+        returns the full firehose — slow on accounts with active automation.
         """
         fields = (
             "event_type,event_time,translated_event_type,"
@@ -450,6 +475,8 @@ class MetaClient:
             params["since"] = int(since.timestamp())
         if until is not None:
             params["until"] = int(until.timestamp())
+        if category is not None:
+            params["category"] = category
         async for item in self._paginate(f"{ad_account_id}/activities", params):
             yield item
 

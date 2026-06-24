@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     meta_app_secret: str = ""
     meta_business_id: str = ""
     meta_ad_account_ids: str = ""  # comma-separated, e.g. "act_111,act_222"
+    # Backup Meta credentials (failover when primary hits Dev-Tier code 17).
+    # Must come from a *different* Meta app — same-app tokens share quota.
+    meta_access_token_backup: str = ""
+    meta_app_secret_backup: str = ""
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/meta_ads"
     admin_api_key: str = ""
     frontend_origin: str = "http://localhost:3000"

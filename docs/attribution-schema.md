@@ -7,6 +7,45 @@
 
 ---
 
+## AppsFlyer cutover — 2026-06-18
+
+> Added 2026-06-18. The MMP switched from **Singular** to **AppsFlyer**. The original
+> Phase 6 design below (Singular / `user_additional_details`) still describes the
+> **pre-cutover** path, which remains correct for signups before 2026-06-18.
+
+**Hard date cut on `DATE(users.created_at)`** decides the attribution source per signup
+(no Singular fallback for post-cut users). Pre-cut history stays Singular and is not
+reprocessed. Both branches coexist, gated by `DATE(u.created_at) >= '2026-06-18'`, in
+`services/worker/sql/attribution/{signups,conversions}.sql` and the dashboard Appography
+query (`scripts/update_meta_dashboard.py`, `APPSFLYER_CUTOVER`).
+
+**New source table: `appsflyer_push_events`** (prod Postgres, EXTERNAL_QUERY) — event-level,
+many rows per user.
+
+| Need | Where | Notes |
+|---|---|---|
+| Signup event | `event_name = 'Sign_Up_Success'` | matches current signup volume |
+| Meta filter | `media_source = 'Facebook Ads'` | the single Meta source |
+| User id | `customer_user_id` | = `users.id` |
+| `meta_campaign_id` | `raw_payload->>'af_c_id'` | 18-digit numeric, 100% coverage |
+| `meta_adset_id` | `raw_payload->>'af_adset_id'` | ~97% coverage |
+| `meta_creative_id` | `raw_payload->>'af_ad_id'` | ~97% coverage |
+| `publisher_site` | `af_channel` | Facebook/Instagram, sparse (~15-20%) |
+| `is_reattributed` | `is_retargeting` | boolean |
+| event/install time | `event_time` / `install_time` | UTC |
+
+**Critical:** the `campaign` / `af_adset` / `af_ad` columns hold AppsFlyer **display names**,
+NOT join keys — the numeric Meta ids only exist in `raw_payload`. Name-matching was rejected
+(ad names are ~49% non-unique). Numeric ids join cleanly to local `campaigns`/`adsets`/`ads`
+(adset/ad gaps are sync lag, closed by `sync.py`'s structure-delta step). Dedup to one signup
+row/user with `DISTINCT ON (customer_user_id) ... ORDER BY event_time`.
+
+Downstream (`attribution_events` schema, MVs, `/conversions/*` API, scoring, dashboards) is
+unchanged — the stored join keys are the same numeric Meta ids regardless of source. **Spend is
+untouched** (always from the Meta API insights tables, never the MMP).
+
+---
+
 ## Q1 — Which BQ dataset and tables are the source of truth?
 
 There is **no BigQuery staging dataset** for attribution. The connection `univest_db` is a **live federated query connection** (Cloud SQL / AlloyDB in `asia-south2`) pointing directly to the Univest production PostgreSQL database. All EXTERNAL_QUERY calls hit the live prod DB in real time.
